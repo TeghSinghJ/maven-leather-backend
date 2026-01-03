@@ -7,9 +7,10 @@ router.post("/", upload.single("image"), controller.createProduct);
 router.patch("/:id/stock", controller.addStock);
 router.post(
   "/bulk-upload",
-  upload.single("file"),
+    upload.single("file"),   // 👈 THIS LINE WAS MISSING
   bulkUploadController.bulkUpload
 );
 router.get("/", controller.getProducts);
+router.get("/available", controller.getAvailableProducts);
 
 module.exports = router;

@@ -1,5 +1,6 @@
 const { LeatherProduct, LeatherStock, sequelize } = require("../../models");
 const { body, validationResult } = require("express-validator");
+const { Op } = require("sequelize"); // 👈 REQUIRED
 
 /* ================= CREATE PRODUCT ================= */
 exports.createProduct = [
@@ -158,5 +159,34 @@ exports.deleteProduct = async (req, res) => {
     res.status(204).send();
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+};
+/* ================= GET ALL AVAILABLE PRODUCTS (FOR PI) ================= */
+exports.getAvailableProducts = async (req, res) => {
+  try {
+    const products = await LeatherProduct.findAll({
+      where: {
+        status: "ACTIVE",
+      },
+      include: [
+        {
+          model: LeatherStock,
+          as: "stock",
+          required: true, // IMPORTANT
+          where: {
+            available_qty: {
+              [Op.gt]: 0, // only available stock
+            },
+          },
+          attributes: ["total_qty", "available_qty", "reserved_qty"],
+        },
+      ],
+      order: [["createdAt", "DESC"]],
+    });
+
+    res.json(products);
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: error.message });
   }
 };

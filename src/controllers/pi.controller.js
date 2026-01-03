@@ -5,11 +5,14 @@ const {
   LeatherProduct,
   sequelize,
 } = require("../../models");
-const { Op } = require("sequelize");
+const { Op ,Transaction} = require("sequelize");
 const generateExactPIPdf = require("../utils/piPdf");
 
 exports.createPI = async (req, res) => {
-  const t = await sequelize.transaction();
+const t = await sequelize.transaction({
+  isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+});
+
   try {
     const {
       customer_name,
@@ -26,18 +29,29 @@ exports.createPI = async (req, res) => {
       throw new Error("No items provided for PI");
     }
 
-    // Validate stock for each item
+    // 1️⃣ Lock ALL required stock rows first
+    const productIds = items.map(i => i.product_id);
+
+    const stocks = await LeatherStock.findAll({
+      where: { product_id: { [Op.in]: productIds } },
+      transaction: t,
+      lock: t.LOCK.UPDATE, // 🔒 CRITICAL
+    });
+
+    const stockMap = {};
+    stocks.forEach(s => {
+      stockMap[s.product_id] = s;
+    });
+
+    // 2️⃣ Validate stock under lock
     for (const item of items) {
-      const stock = await LeatherStock.findOne({
-        where: { product_id: item.product_id },
-        transaction: t,
-      });
+      const stock = stockMap[item.product_id];
       if (!stock || stock.available_qty < item.qty) {
-        throw new Error(`Insufficient stock for product_id ${item.product_id}`);
+        throw new Error(`Insufficient stock for product ${item.product_id}`);
       }
     }
 
-    // Create PI
+    // 3️⃣ Create PI
     const expires_at = new Date();
     expires_at.setDate(expires_at.getDate() + 7);
 
@@ -56,34 +70,35 @@ exports.createPI = async (req, res) => {
       { transaction: t }
     );
 
-    // Create PI items and reserve stock
+    // 4️⃣ Create items + reserve stock atomically
     for (const item of items) {
       await PIItem.create(
         {
           pi_id: pi.id,
           product_id: item.product_id,
           qty: item.qty,
+          rate: item.rate, 
         },
         { transaction: t }
       );
 
-      const stock = await LeatherStock.findOne({
-        where: { product_id: item.product_id },
-        transaction: t,
-      });
-
+      const stock = stockMap[item.product_id];
       stock.available_qty -= item.qty;
       stock.reserved_qty += item.qty;
       await stock.save({ transaction: t });
     }
 
     await t.commit();
-    res.status(201).json({ message: "PI created successfully", pi_id: pi.id });
+    res.status(201).json({
+      message: "PI created & stock reserved successfully",
+      pi_id: pi.id,
+    });
   } catch (err) {
     await t.rollback();
     res.status(400).json({ error: err.message });
   }
 };
+
 
 exports.getPIs = async (req, res) => {
   try {
@@ -111,30 +126,30 @@ exports.getPIs = async (req, res) => {
 };
 exports.cancelPI = async (req, res) => {
   const t = await sequelize.transaction();
-  try {
-    const { id } = req.params;
 
-    const pi = await ProformaInvoice.findByPk(id, {
+  try {
+    const pi = await ProformaInvoice.findByPk(req.params.id, {
       include: [{ model: PIItem, as: "items" }],
       transaction: t,
-      lock: true,
+      lock: t.LOCK.UPDATE,
     });
 
-    if (!pi) {
-      throw new Error("PI not found");
-    }
+    if (!pi) throw new Error("PI not found");
+    if (pi.status !== "ACTIVE") throw new Error("Only ACTIVE PI can be cancelled");
 
-    if (pi.status !== "ACTIVE") {
-      throw new Error("Only ACTIVE PI can be cancelled");
-    }
+    const productIds = pi.items.map(i => i.product_id);
+
+    const stocks = await LeatherStock.findAll({
+      where: { product_id: { [Op.in]: productIds } },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+
+    const stockMap = {};
+    stocks.forEach(s => (stockMap[s.product_id] = s));
 
     for (const item of pi.items) {
-      const stock = await LeatherStock.findOne({
-        where: { product_id: item.product_id },
-        transaction: t,
-        lock: true,
-      });
-
+      const stock = stockMap[item.product_id];
       stock.available_qty += item.qty;
       stock.reserved_qty -= item.qty;
       await stock.save({ transaction: t });
@@ -144,7 +159,7 @@ exports.cancelPI = async (req, res) => {
     await pi.save({ transaction: t });
 
     await t.commit();
-    res.json({ message: "PI cancelled and stock unreserved successfully" });
+    res.json({ message: "PI cancelled and stock released" });
   } catch (err) {
     await t.rollback();
     res.status(400).json({ error: err.message });

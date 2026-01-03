@@ -20,6 +20,7 @@ module.exports = (sequelize, DataTypes) => {
       pi_id: DataTypes.INTEGER,
       product_id: DataTypes.INTEGER,
       qty: DataTypes.FLOAT,
+      rate:DataTypes.FLOAT
     },
     {
       sequelize,
