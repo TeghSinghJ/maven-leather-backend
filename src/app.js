@@ -14,6 +14,7 @@ app.use("/api/pi", piRoutes);
 app.use("/api/collections", require("./routes/collection.routes"));
 app.use("/api/sub-collections", require("./routes/subCollection.routes"));
 app.use("/api/series", require("./routes/series.routes"));
+app.use("/api/leather-hide-stocks", require("./routes/leatherHideStock.routes"));
 
 app.get("/health", (req, res) => {
   res.json({ status: "OK" });
