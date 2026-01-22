@@ -13,13 +13,16 @@ module.exports = (sequelize, DataTypes) => {
   );
 
   LeatherProduct.associate = (models) => {
-    // LeatherStock association
     LeatherProduct.hasOne(models.LeatherStock, {
       foreignKey: "product_id",
       as: "stock",
     });
 
-    // Optional: CollectionSeries association
+    LeatherProduct.hasMany(models.LeatherHideStock, {
+      foreignKey: "product_id",
+      as: "batches",
+    });
+
     LeatherProduct.belongsTo(models.CollectionSeries, {
       foreignKey: "collection_series_id",
       as: "series",

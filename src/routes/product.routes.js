@@ -7,7 +7,7 @@ router.post("/", upload.single("image"), controller.createProduct);
 router.patch("/:id/stock", controller.addStock);
 router.post(
   "/bulk-upload",
-    upload.single("file"),   // 👈 THIS LINE WAS MISSING
+    upload.single("file"),   
   bulkUploadController.bulkUpload
 );
 router.get("/", controller.getProducts);

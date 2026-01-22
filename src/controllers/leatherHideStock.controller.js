@@ -22,10 +22,9 @@ exports.createHideStock = async (req, res) => {
   }
 };
 
-// Bulk create hides
 exports.createBulkHideStock = async (req, res) => {
   try {
-    const { product_id, batch_no, hides } = req.body; // hides = [{ qty: 10 }, { qty: 15 }]
+    const { product_id, batch_no, hides } = req.body; 
     if (!Array.isArray(hides) || hides.length === 0)
       return res.status(400).json({ message: "No hides provided" });
 
@@ -46,7 +45,6 @@ exports.createBulkHideStock = async (req, res) => {
   }
 };
 
-// List hides by product
 exports.listByProduct = async (req, res) => {
   try {
     const { productId } = req.params;

@@ -1,6 +1,6 @@
-const { LeatherProduct, LeatherStock, sequelize } = require("../../models");
+const { LeatherProduct, LeatherStock,LeatherHideStock, sequelize } = require("../../models");
 const { body, validationResult } = require("express-validator");
-const { Op } = require("sequelize"); // 👈 REQUIRED
+const { Op, fn ,col} = require("sequelize"); // 👈 REQUIRED
 
 exports.createProduct = [
   body("collection_series_id").isInt().withMessage("Collection Series ID is required"),
@@ -144,7 +144,7 @@ exports.updateProduct = async (req, res) => {
   }
 };
 
-/* ================= DELETE PRODUCT (SOFT) ================= */
+
 exports.deleteProduct = async (req, res) => {
   try {
     const [deleted] = await LeatherProduct.update(
@@ -159,32 +159,44 @@ exports.deleteProduct = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
-/* ================= GET ALL AVAILABLE PRODUCTS (FOR PI) ================= */
+
 exports.getAvailableProducts = async (req, res) => {
   try {
     const products = await LeatherProduct.findAll({
-      where: {
-        status: "ACTIVE",
-      },
+      where: { status: "ACTIVE" },
+
       include: [
         {
-          model: LeatherStock,
-          as: "stock",
-          required: true, // IMPORTANT
+          model: LeatherHideStock,
+          as: "batches",
+          required: true,
           where: {
-            available_qty: {
-              [Op.gt]: 0, // only available stock
-            },
+            status: "AVAILABLE",
+            qty: { [Op.gt]: 0 },
           },
-          attributes: ["total_qty", "available_qty", "reserved_qty"],
+          attributes: [],
         },
       ],
+
+      attributes: {
+        include: [
+          [fn("SUM", col("batches.qty")), "available_qty"],
+        ],
+      },
+
+      group: ["LeatherProduct.id"],
       order: [["createdAt", "DESC"]],
+      raw: true, 
     });
 
-    res.json(products);
+    const result = products.map((p) => ({
+      ...p,
+      available_qty: Math.floor(Number(p.available_qty || 0) * 100) / 100,
+    }));
+
+    res.json(result);
   } catch (error) {
-    console.error(error);
+    console.error("getAvailableProducts error:", error);
     res.status(500).json({ error: error.message });
   }
 };
