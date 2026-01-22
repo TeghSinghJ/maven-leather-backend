@@ -1,11 +1,11 @@
 module.exports = {
   COMPANY: {
-    name: "Your Company Name",
-    address: "Company Address Line 1, City, State",
+    name: "Marvin Leather Experience Centre",
+    address: "47, Wilson Garden, Hosur Main Road, Bengaluru, Karnataka 560027, India",
     gstin: "29ABCDE1234F1Z5",
-    state: "Tamil Nadu",
+    state: "Karnataka",
   },
-  DEFAULT_RATE: 250, // ₹ per unit (STATIC)
+  DEFAULT_RATE: 250, 
   CGST: 9,
   SGST: 9,
   IGST: 18,

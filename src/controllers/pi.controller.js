@@ -1,7 +1,9 @@
 const {
+  LeatherStock,
   ProformaInvoice,
   PIItem,
-  LeatherStock,
+  CollectionPrice,
+  LeatherHideStock,
   LeatherProduct,
   sequelize,
 } = require("../../models");
@@ -9,9 +11,9 @@ const { Op ,Transaction} = require("sequelize");
 const generateExactPIPdf = require("../utils/piPdf");
 
 exports.createPI = async (req, res) => {
-const t = await sequelize.transaction({
-  isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
-});
+  const t = await sequelize.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  });
 
   try {
     const {
@@ -22,38 +24,17 @@ const t = await sequelize.transaction({
       gst_number,
       contact_number,
       pin_code,
+      transport_name,
+      receiver_courier_name,
+      delivery_address,
+      bus_company_details,
+      price_type, // <-- new field from UI
       items,
     } = req.body;
 
     if (!items || items.length === 0) {
       throw new Error("No items provided for PI");
     }
-
-    // 1️⃣ Lock ALL required stock rows first
-    const productIds = items.map(i => i.product_id);
-
-    const stocks = await LeatherStock.findAll({
-      where: { product_id: { [Op.in]: productIds } },
-      transaction: t,
-      lock: t.LOCK.UPDATE, // 🔒 CRITICAL
-    });
-
-    const stockMap = {};
-    stocks.forEach(s => {
-      stockMap[s.product_id] = s;
-    });
-
-    // 2️⃣ Validate stock under lock
-    for (const item of items) {
-      const stock = stockMap[item.product_id];
-      if (!stock || stock.available_qty < item.qty) {
-        throw new Error(`Insufficient stock for product ${item.product_id}`);
-      }
-    }
-
-    // 3️⃣ Create PI
-    const expires_at = new Date();
-    expires_at.setDate(expires_at.getDate() + 7);
 
     const pi = await ProformaInvoice.create(
       {
@@ -64,41 +45,82 @@ const t = await sequelize.transaction({
         gst_number,
         contact_number,
         pin_code,
+        transport_name,
+        receiver_courier_name,
+        delivery_address,
+        bus_company_details,
         status: "ACTIVE",
-        expires_at,
+        expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
       { transaction: t }
     );
 
-    // 4️⃣ Create items + reserve stock atomically
     for (const item of items) {
+      // Pick the CollectionPrice based on price_type
+      const priceObj = await CollectionPrice.findOne({
+        where: { collection_series_id: item.collection_series_id, price_type },
+      });
+
+      if (!priceObj) {
+        throw new Error(
+          `No price defined for product ${item.product_id} with type ${price_type}`
+        );
+      }
+
+      // Find LeatherHideStock batches for this product
+      const hideStocks = await LeatherHideStock.findAll({
+        where: { product_id: item.product_id, status: "AVAILABLE" },
+        order: [["batch_no", "ASC"]],
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+
+      let qtyRemaining = item.qty;
+      const usedBatches = [];
+
+      for (const stock of hideStocks) {
+        if (qtyRemaining <= 0) break;
+
+        if (stock.qty >= qtyRemaining) {
+          usedBatches.push({ hide_id: stock.hide_id, qty: qtyRemaining });
+          stock.qty -= qtyRemaining;
+          stock.status = stock.qty === 0 ? "RESERVED" : "AVAILABLE";
+          await stock.save({ transaction: t });
+          qtyRemaining = 0;
+        } else {
+          usedBatches.push({ hide_id: stock.hide_id, qty: stock.qty });
+          qtyRemaining -= stock.qty;
+          stock.qty = 0;
+          stock.status = "RESERVED";
+          await stock.save({ transaction: t });
+        }
+      }
+
+      if (qtyRemaining > 0) {
+        throw new Error(
+          `Insufficient stock for product ${item.product_id}`
+        );
+      }
+
       await PIItem.create(
         {
           pi_id: pi.id,
           product_id: item.product_id,
           qty: item.qty,
-          rate: item.rate, 
+          rate: priceObj.price,
+          batch_info: JSON.stringify(usedBatches),
         },
         { transaction: t }
       );
-
-      const stock = stockMap[item.product_id];
-      stock.available_qty -= item.qty;
-      stock.reserved_qty += item.qty;
-      await stock.save({ transaction: t });
     }
 
     await t.commit();
-    res.status(201).json({
-      message: "PI created & stock reserved successfully",
-      pi_id: pi.id,
-    });
+    res.status(201).json({ message: "PI created successfully", pi_id: pi.id });
   } catch (err) {
     await t.rollback();
     res.status(400).json({ error: err.message });
   }
 };
-
 
 exports.getPIs = async (req, res) => {
   try {

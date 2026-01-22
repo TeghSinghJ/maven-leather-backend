@@ -2,9 +2,7 @@ const { LeatherProduct, LeatherStock, sequelize } = require("../../models");
 const { body, validationResult } = require("express-validator");
 const { Op } = require("sequelize"); // 👈 REQUIRED
 
-/* ================= CREATE PRODUCT ================= */
 exports.createProduct = [
-  // Validation
   body("collection_series_id").isInt().withMessage("Collection Series ID is required"),
   body("leather_code").notEmpty().withMessage("Leather code is required"),
   body("color").notEmpty().withMessage("Color is required"),

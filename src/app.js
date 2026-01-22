@@ -15,6 +15,8 @@ app.use("/api/collections", require("./routes/collection.routes"));
 app.use("/api/sub-collections", require("./routes/subCollection.routes"));
 app.use("/api/series", require("./routes/series.routes"));
 app.use("/api/leather-hide-stocks", require("./routes/leatherHideStock.routes"));
+app.use("/api/collection-prices", require("./routes/collectionPrice.routes"));
+app.use("/api/dashboard", require("./routes/dashboard.routes"));
 
 app.get("/health", (req, res) => {
   res.json({ status: "OK" });
