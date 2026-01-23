@@ -6,5 +6,6 @@ router.post("/", controller.createPI);
 router.get("/", controller.getPIs);
 router.post("/:id/cancel", controller.cancelPI);
 router.get("/:id/download", controller.downloadPI);
+router.put("/:id/revisit", controller.revisitPI);
 
 module.exports = router;

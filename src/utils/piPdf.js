@@ -109,18 +109,31 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc
       .font("Helvetica-Bold")
       .fontSize(9)
-      .text(PI_CONST.COMPANY.name, leftCol + 5, currentY + 10);
-    doc.font("Helvetica").fontSize(8);
-    doc.text(PI_CONST.COMPANY.address, leftCol + 5, currentY + 22);
+      .text(PI_CONST.COMPANY.name, leftCol + 5, currentY + 10, {
+        width: 250,
+        align: "left",
+      });
+
+    doc
+      .font("Helvetica")
+      .fontSize(8)
+      .text(PI_CONST.COMPANY.address, leftCol + 5, currentY + 22, {
+        width: 250,
+        align: "left",
+      });
+
     doc.text(
       `GSTIN/UIN: ${PI_CONST.COMPANY.gstin}`,
       leftCol + 5,
       currentY + 42,
+      { width: 250, align: "left" },
     );
+
     doc.text(
       `State Name: ${PI_CONST.COMPANY.state}, Code: ${PI_CONST.COMPANY.stateCode}`,
       leftCol + 5,
       currentY + 52,
+      { width: 250, align: "left" },
     );
 
     doc
@@ -154,7 +167,7 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc.font("Helvetica").text(pi.address, leftCol + 5, currentY + 25);
     doc.text(`GSTIN/UIN: ${pi.gst_number || "-"}`, leftCol + 5, currentY + 45);
     doc.text(
-      `State Name: ${pi.state}, Code: ${pi.state_code}`,
+      `State Name: ${pi.state}, Code: ${pi.pin_code}`,
       leftCol + 5,
       currentY + 55,
     );
@@ -198,7 +211,7 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc.font("Helvetica").fontSize(8);
 
     pi.items.forEach((item, i) => {
-      const rate = item.rate || PI_CONST.DEFAULT_RATE;
+      const rate = item.rate;
       const qty = item.qty;
       const amount = rate * qty;
       subtotal += amount;
@@ -234,24 +247,32 @@ module.exports = function generateExactPIPdf(res, pi) {
       currentY += 20;
     });
 
-    const sameState = pi.state === PI_CONST.COMPANY.state;
+    const sameState =
+      pi.state?.trim().toLowerCase() ===
+      PI_CONST.COMPANY.state.trim().toLowerCase();
+
     const cgst = sameState ? (subtotal * PI_CONST.CGST) / 100 : 0;
     const sgst = sameState ? (subtotal * PI_CONST.SGST) / 100 : 0;
     const igst = sameState ? 0 : (subtotal * PI_CONST.IGST) / 100;
     const grandTotal = subtotal + cgst + sgst + igst;
 
-    if (cgst) {
-      doc.text("Output CGST @ 2.5%", leftCol + 32, currentY + 5);
+    if (sameState) {
+      doc.text(`Output CGST @ ${PI_CONST.CGST}%`, leftCol + 32, currentY + 5);
       doc.text(cgst.toFixed(2), leftCol + 472, currentY + 5, {
         width: 43,
         align: "right",
       });
       currentY += 12;
-    }
 
-    if (sgst) {
-      doc.text("Output SGST @ 2.5%", leftCol + 32, currentY + 5);
+      doc.text(`Output SGST @ ${PI_CONST.SGST}%`, leftCol + 32, currentY + 5);
       doc.text(sgst.toFixed(2), leftCol + 472, currentY + 5, {
+        width: 43,
+        align: "right",
+      });
+      currentY += 12;
+    } else {
+      doc.text(`Output IGST @ ${PI_CONST.IGST}%`, leftCol + 32, currentY + 5);
+      doc.text(igst.toFixed(2), leftCol + 472, currentY + 5, {
         width: 43,
         align: "right",
       });

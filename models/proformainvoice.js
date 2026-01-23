@@ -36,7 +36,7 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING,
       },
       status: {
-        type: DataTypes.ENUM("ACTIVE", "EXPIRED", "CONFIRMED"),
+        type: DataTypes.ENUM("ACTIVE", "EXPIRED", "CONFIRMED","CANCELLED"),
         defaultValue: "ACTIVE",
       },
       expires_at: {

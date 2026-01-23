@@ -28,14 +28,17 @@ exports.createPI = async (req, res) => {
       receiver_courier_name,
       delivery_address,
       bus_company_details,
-      price_type, // <-- new field from UI
+      price_type,
       items,
     } = req.body;
 
-    if (!items || items.length === 0) {
+    if (!Array.isArray(items) || items.length === 0) {
       throw new Error("No items provided for PI");
     }
 
+    /**
+     * STEP 1: Create PI
+     */
     const pi = await ProformaInvoice.create(
       {
         customer_name,
@@ -55,21 +58,58 @@ exports.createPI = async (req, res) => {
       { transaction: t }
     );
 
+    /**
+     * STEP 2: Process each item
+     */
     for (const item of items) {
-      // Pick the CollectionPrice based on price_type
+      if (!item.product_id || !item.qty || item.qty <= 0) {
+        throw new Error("Invalid item payload");
+      }
+
+      /**
+       * 2.1 Fetch price based on price_type
+       */
       const priceObj = await CollectionPrice.findOne({
-        where: { collection_series_id: item.collection_series_id, price_type },
+        where: {
+          collection_series_id: item.collection_series_id,
+          price_type,
+        },
+        transaction: t,
       });
 
       if (!priceObj) {
         throw new Error(
-          `No price defined for product ${item.product_id} with type ${price_type}`
+          `Price not defined for collection_series ${item.collection_series_id} with price type ${price_type}`
         );
       }
 
-      // Find LeatherHideStock batches for this product
+      /**
+       * 2.2 Lock & validate LeatherStock (aggregate stock)
+       */
+      const leatherStock = await LeatherStock.findOne({
+        where: { product_id: item.product_id },
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+
+      if (!leatherStock) {
+        throw new Error(`LeatherStock not found for product ${item.product_id}`);
+      }
+
+      if (leatherStock.available_qty < item.qty) {
+        throw new Error(
+          `Insufficient available stock for product ${item.product_id}`
+        );
+      }
+
+      /**
+       * 2.3 Fetch & lock batch stocks (FIFO)
+       */
       const hideStocks = await LeatherHideStock.findAll({
-        where: { product_id: item.product_id, status: "AVAILABLE" },
+        where: {
+          product_id: item.product_id,
+          status: "AVAILABLE",
+        },
         order: [["batch_no", "ASC"]],
         transaction: t,
         lock: t.LOCK.UPDATE,
@@ -81,44 +121,65 @@ exports.createPI = async (req, res) => {
       for (const stock of hideStocks) {
         if (qtyRemaining <= 0) break;
 
-        if (stock.qty >= qtyRemaining) {
-          usedBatches.push({ hide_id: stock.hide_id, qty: qtyRemaining });
-          stock.qty -= qtyRemaining;
-          stock.status = stock.qty === 0 ? "RESERVED" : "AVAILABLE";
-          await stock.save({ transaction: t });
-          qtyRemaining = 0;
-        } else {
-          usedBatches.push({ hide_id: stock.hide_id, qty: stock.qty });
-          qtyRemaining -= stock.qty;
-          stock.qty = 0;
-          stock.status = "RESERVED";
-          await stock.save({ transaction: t });
-        }
+        const consumeQty = Math.min(stock.qty, qtyRemaining);
+
+        usedBatches.push({
+          hide_id: stock.hide_id,
+          batch_no: stock.batch_no,
+          qty: consumeQty,
+        });
+
+        stock.qty -= consumeQty;
+        stock.status = stock.qty === 0 ? "RESERVED" : "AVAILABLE";
+
+        await stock.save({ transaction: t });
+
+        qtyRemaining -= consumeQty;
       }
 
       if (qtyRemaining > 0) {
         throw new Error(
-          `Insufficient stock for product ${item.product_id}`
+          `Batch stock mismatch for product ${item.product_id}`
         );
       }
 
+      /**
+       * 2.4 Update aggregate LeatherStock
+       */
+      leatherStock.reserved_qty += item.qty;
+      leatherStock.available_qty -= item.qty;
+
+      await leatherStock.save({ transaction: t });
+
+      /**
+       * 2.5 Create PI Item
+       */
       await PIItem.create(
         {
           pi_id: pi.id,
           product_id: item.product_id,
           qty: item.qty,
           rate: priceObj.price,
-          batch_info: JSON.stringify(usedBatches),
+          batch_info: usedBatches, // store JSON directly if column is JSON
         },
         { transaction: t }
       );
     }
 
     await t.commit();
-    res.status(201).json({ message: "PI created successfully", pi_id: pi.id });
-  } catch (err) {
+
+    return res.status(201).json({
+      message: "Proforma Invoice created successfully",
+      pi_id: pi.id,
+    });
+  } catch (error) {
     await t.rollback();
-    res.status(400).json({ error: err.message });
+
+    console.error("PI Creation Error:", error);
+
+    return res.status(400).json({
+      error: error.message || "Failed to create PI",
+    });
   }
 };
 
@@ -213,5 +274,210 @@ exports.downloadPI = async (req, res) => {
     return generateExactPIPdf(res, pi);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+};
+exports.revisitPI = async (req, res) => {
+  const t = await sequelize.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  });
+
+  try {
+    const { id } = req.params;
+    const { items } = req.body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error("No items provided for revisit");
+    }
+
+    /**
+     * STEP 1: Fetch & lock PI
+     */
+    const pi = await ProformaInvoice.findByPk(id, {
+      include: [{ model: PIItem, as: "items" }],
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+
+    if (!pi) throw new Error("PI not found");
+    if (pi.status !== "ACTIVE") {
+      throw new Error("Only ACTIVE PI can be revisited");
+    }
+
+    /**
+     * STEP 2: Cache old rates (CRITICAL)
+     */
+    const rateMap = {};
+    pi.items.forEach((i) => {
+      rateMap[i.product_id] = i.rate;
+    });
+
+    /**
+     * STEP 3: Release old reserved aggregate stock
+     */
+    const productIds = pi.items.map((i) => i.product_id);
+
+    const stocks = await LeatherStock.findAll({
+      where: { product_id: { [Op.in]: productIds } },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+
+    const stockMap = {};
+    stocks.forEach((s) => (stockMap[s.product_id] = s));
+
+    for (const oldItem of pi.items) {
+      const stock = stockMap[oldItem.product_id];
+
+      if (!stock) continue;
+
+      stock.available_qty += oldItem.qty;
+      stock.reserved_qty -= oldItem.qty;
+
+      if (stock.reserved_qty < 0) stock.reserved_qty = 0;
+
+      await stock.save({ transaction: t });
+    }
+
+    /**
+     * STEP 4: Restore batch stock
+     */
+    for (const oldItem of pi.items) {
+      const batches = oldItem.batch_info || [];
+
+      for (const b of batches) {
+        const hideStock = await LeatherHideStock.findOne({
+          where: { hide_id: b.hide_id },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+
+        if (hideStock) {
+          hideStock.qty += b.qty;
+          hideStock.status = "AVAILABLE";
+          await hideStock.save({ transaction: t });
+        }
+      }
+    }
+
+    /**
+     * STEP 5: Delete old PI items
+     */
+    await PIItem.destroy({
+      where: { pi_id: pi.id },
+      transaction: t,
+    });
+
+    /**
+     * STEP 6: Re-reserve stock & recreate PI items
+     */
+    for (const item of items) {
+      if (!item.product_id || !item.qty || item.qty <= 0) {
+        throw new Error("Invalid item payload");
+      }
+
+      const rate = rateMap[item.product_id];
+      if (rate === undefined || rate === null) {
+        throw new Error(
+          `Rate not found for product ${item.product_id}. Cannot revisit PI`
+        );
+      }
+
+      /**
+       * 6.1 Lock LeatherStock
+       */
+      const leatherStock = await LeatherStock.findOne({
+        where: { product_id: item.product_id },
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+
+      if (!leatherStock) {
+        throw new Error(
+          `LeatherStock not found for product ${item.product_id}`
+        );
+      }
+
+      if (leatherStock.available_qty < item.qty) {
+        throw new Error(
+          `Insufficient available stock for product ${item.product_id}`
+        );
+      }
+
+      /**
+       * 6.2 Consume batch stock (FIFO)
+       */
+      const hideStocks = await LeatherHideStock.findAll({
+        where: {
+          product_id: item.product_id,
+          status: "AVAILABLE",
+        },
+        order: [["batch_no", "ASC"]],
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+
+      let qtyRemaining = item.qty;
+      const usedBatches = [];
+
+      for (const stock of hideStocks) {
+        if (qtyRemaining <= 0) break;
+
+        const consumeQty = Math.min(stock.qty, qtyRemaining);
+
+        usedBatches.push({
+          hide_id: stock.hide_id,
+          batch_no: stock.batch_no,
+          qty: consumeQty,
+        });
+
+        stock.qty -= consumeQty;
+        stock.status = stock.qty === 0 ? "RESERVED" : "AVAILABLE";
+
+        await stock.save({ transaction: t });
+
+        qtyRemaining -= consumeQty;
+      }
+
+      if (qtyRemaining > 0) {
+        throw new Error(
+          `Insufficient batch stock for product ${item.product_id}`
+        );
+      }
+
+      /**
+       * 6.3 Update aggregate stock
+       */
+      leatherStock.available_qty -= item.qty;
+      leatherStock.reserved_qty += item.qty;
+      await leatherStock.save({ transaction: t });
+
+      /**
+       * 6.4 Recreate PI item (RATE PRESERVED)
+       */
+      await PIItem.create(
+        {
+          pi_id: pi.id,
+          product_id: item.product_id,
+          qty: item.qty,
+          rate,
+          batch_info: usedBatches,
+        },
+        { transaction: t }
+      );
+    }
+
+    /**
+     * STEP 7: Update PI timestamp
+     */
+    pi.updatedAt = new Date();
+    await pi.save({ transaction: t });
+
+    await t.commit();
+
+    res.json({ message: "PI revisited successfully" });
+  } catch (err) {
+    await t.rollback();
+    console.error("Revisit PI Error:", err);
+    res.status(400).json({ error: err.message });
   }
 };
