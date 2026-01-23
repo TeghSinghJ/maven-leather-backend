@@ -49,7 +49,6 @@ exports.createProduct = [
   },
 ];
 
-/* ================= ADD STOCK ================= */
 exports.addStock = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
@@ -80,7 +79,6 @@ exports.addStock = async (req, res) => {
   }
 };
 
-/* ================= GET ALL PRODUCTS ================= */
 exports.getProducts = async (req, res) => {
   try {
     const whereClause = {
@@ -126,7 +124,6 @@ exports.getProductById = async (req, res) => {
   }
 };
 
-/* ================= UPDATE PRODUCT ================= */
 exports.updateProduct = async (req, res) => {
   try {
     const { leather_code, color, description, image_url } = req.body;
