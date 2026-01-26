@@ -4,12 +4,13 @@ const {
   PIItem,
   CollectionPrice,
   LeatherHideStock,
+  TransportType,
+  Transport,
   LeatherProduct,
   sequelize,
 } = require("../../models");
 const { Op ,Transaction} = require("sequelize");
 const generateExactPIPdf = require("../utils/piPdf");
-
 exports.createPI = async (req, res) => {
   const t = await sequelize.transaction({
     isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
@@ -24,21 +25,38 @@ exports.createPI = async (req, res) => {
       gst_number,
       contact_number,
       pin_code,
-      transport_name,
-      receiver_courier_name,
-      delivery_address,
-      bus_company_details,
       price_type,
       items,
+      delivery_address,
+      receiver_courier_name,
+      transport_type_id,
+      transport_id,
+      weight_kg,
+      transport_payment_status,
     } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
       throw new Error("No items provided for PI");
     }
 
-    /**
-     * STEP 1: Create PI
-     */
+    let transportAmount = 0;
+
+    if (transport_type_id && weight_kg) {
+      const transportType = await TransportType.findByPk(transport_type_id, {
+        transaction: t,
+      });
+
+      if (!transportType) {
+        throw new Error("Invalid transport type");
+      }
+
+      transportAmount =
+        Number(weight_kg) * Number(transportType.base_price);
+    }
+
+    const finalTransportAmount =
+      transport_payment_status === "PAID" ? 0 : transportAmount;
+
     const pi = await ProformaInvoice.create(
       {
         customer_name,
@@ -46,29 +64,28 @@ exports.createPI = async (req, res) => {
         address,
         state,
         gst_number,
-        contact_number,
-        pin_code,
-        transport_name,
         receiver_courier_name,
         delivery_address,
-        bus_company_details,
+        contact_number,
+        pin_code,
+
+        transport_type_id,
+        transport_id,
+        weight_kg,
+        transport_payment_status,
+        transport_amount: finalTransportAmount,
+
         status: "ACTIVE",
         expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
       { transaction: t }
     );
 
-    /**
-     * STEP 2: Process each item
-     */
     for (const item of items) {
       if (!item.product_id || !item.qty || item.qty <= 0) {
         throw new Error("Invalid item payload");
       }
 
-      /**
-       * 2.1 Fetch price based on price_type
-       */
       const priceObj = await CollectionPrice.findOne({
         where: {
           collection_series_id: item.collection_series_id,
@@ -78,33 +95,19 @@ exports.createPI = async (req, res) => {
       });
 
       if (!priceObj) {
-        throw new Error(
-          `Price not defined for collection_series ${item.collection_series_id} with price type ${price_type}`
-        );
+        throw new Error("Price not defined for product");
       }
 
-      /**
-       * 2.2 Lock & validate LeatherStock (aggregate stock)
-       */
       const leatherStock = await LeatherStock.findOne({
         where: { product_id: item.product_id },
         transaction: t,
         lock: t.LOCK.UPDATE,
       });
 
-      if (!leatherStock) {
-        throw new Error(`LeatherStock not found for product ${item.product_id}`);
+      if (!leatherStock || leatherStock.available_qty < item.qty) {
+        throw new Error("Insufficient stock");
       }
 
-      if (leatherStock.available_qty < item.qty) {
-        throw new Error(
-          `Insufficient available stock for product ${item.product_id}`
-        );
-      }
-
-      /**
-       * 2.3 Fetch & lock batch stocks (FIFO)
-       */
       const hideStocks = await LeatherHideStock.findAll({
         where: {
           product_id: item.product_id,
@@ -131,36 +134,22 @@ exports.createPI = async (req, res) => {
 
         stock.qty -= consumeQty;
         stock.status = stock.qty === 0 ? "RESERVED" : "AVAILABLE";
-
         await stock.save({ transaction: t });
 
         qtyRemaining -= consumeQty;
       }
 
-      if (qtyRemaining > 0) {
-        throw new Error(
-          `Batch stock mismatch for product ${item.product_id}`
-        );
-      }
-
-      /**
-       * 2.4 Update aggregate LeatherStock
-       */
       leatherStock.reserved_qty += item.qty;
       leatherStock.available_qty -= item.qty;
-
       await leatherStock.save({ transaction: t });
 
-      /**
-       * 2.5 Create PI Item
-       */
       await PIItem.create(
         {
           pi_id: pi.id,
           product_id: item.product_id,
           qty: item.qty,
           rate: priceObj.price,
-          batch_info: usedBatches, // store JSON directly if column is JSON
+          batch_info: usedBatches,
         },
         { transaction: t }
       );
@@ -174,14 +163,10 @@ exports.createPI = async (req, res) => {
     });
   } catch (error) {
     await t.rollback();
-
-    console.error("PI Creation Error:", error);
-
-    return res.status(400).json({
-      error: error.message || "Failed to create PI",
-    });
+    return res.status(400).json({ error: error.message });
   }
 };
+
 
 exports.getPIs = async (req, res) => {
   try {

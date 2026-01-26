@@ -8,59 +8,73 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: "pi_id",
         as: "items",
       });
+
+      ProformaInvoice.belongsTo(models.TransportType, {
+        foreignKey: "transport_type_id",
+        as: "transportType",
+      });
+
+      ProformaInvoice.belongsTo(models.Transport, {
+        foreignKey: "transport_id",
+        as: "transport",
+      });
     }
   }
 
   ProformaInvoice.init(
     {
-      customer_name: {
-        type: DataTypes.STRING,
-        allowNull: false,
-      },
-      whatsapp_number: {
-        type: DataTypes.STRING,
-      },
-      address: {
-        type: DataTypes.STRING,
-      },
-      state: {
-        type: DataTypes.STRING,
-      },
-      gst_number: {
-        type: DataTypes.STRING,
-      },
-      contact_number: {
-        type: DataTypes.STRING,
-      },
-      pin_code: {
-        type: DataTypes.STRING,
-      },
+      customer_name: { type: DataTypes.STRING, allowNull: false },
+      whatsapp_number: DataTypes.STRING,
+      address: DataTypes.STRING,
+      state: DataTypes.STRING,
+      gst_number: DataTypes.STRING,
+      contact_number: DataTypes.STRING,
+      pin_code: DataTypes.STRING,
+
       status: {
-        type: DataTypes.ENUM("ACTIVE", "EXPIRED", "CONFIRMED","CANCELLED"),
+        type: DataTypes.ENUM("ACTIVE", "EXPIRED", "CONFIRMED", "CANCELLED"),
         defaultValue: "ACTIVE",
       },
-      expires_at: {
-        type: DataTypes.DATE,
+
+      expires_at: DataTypes.DATE,
+
+      transport_type_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
       },
-      // NEW FIELDS
-      transport_name: {
-        type: DataTypes.STRING,
-      },
-      receiver_courier_name: {
-        type: DataTypes.STRING,
+
+      transport_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
       },
       delivery_address: {
         type: DataTypes.STRING,
+        allowNull: true,
       },
-      bus_company_details: {
+      weight_kg: {
+        type: DataTypes.FLOAT,
+        allowNull: true,
+      },
+
+      transport_payment_status: {
+        type: DataTypes.ENUM("PAID", "TO_BE_PAID"),
+        defaultValue: "TO_BE_PAID",
+      },
+      receiver_courier_name: {
         type: DataTypes.STRING,
+        allowNull: true,
+      },
+
+      transport_amount: {
+        type: DataTypes.FLOAT,
+        defaultValue: 0,
       },
     },
     {
       sequelize,
       modelName: "ProformaInvoice",
       tableName: "proforma_invoices",
-    }
+    },
   );
 
   return ProformaInvoice;

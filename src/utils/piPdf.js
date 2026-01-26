@@ -254,7 +254,12 @@ module.exports = function generateExactPIPdf(res, pi) {
     const cgst = sameState ? (subtotal * PI_CONST.CGST) / 100 : 0;
     const sgst = sameState ? (subtotal * PI_CONST.SGST) / 100 : 0;
     const igst = sameState ? 0 : (subtotal * PI_CONST.IGST) / 100;
-    const grandTotal = subtotal + cgst + sgst + igst;
+    let grandTotal = subtotal + cgst + sgst + igst;
+    let transportCharge = 0;
+    if (pi.transport_payment_status === "TO_BE_PAID" && pi.transport_amount) {
+      transportCharge = pi.transport_amount;
+      grandTotal += transportCharge;
+    }
 
     if (sameState) {
       doc.text(`Output CGST @ ${PI_CONST.CGST}%`, leftCol + 32, currentY + 5);
@@ -281,6 +286,30 @@ module.exports = function generateExactPIPdf(res, pi) {
 
     currentY = tableTop + 300;
     doc.moveTo(40, currentY).lineTo(555, currentY).stroke();
+    if (
+      pi.transport_payment_status === "TO_BE_PAID" &&
+      pi.transport_amount > 0
+    ) {
+      doc
+        .font("Helvetica")
+        .fontSize(8)
+        .text("Transport Charges", leftCol + 32, currentY + 5);
+
+      doc.text(pi.transport_amount.toFixed(2), leftCol + 472, currentY + 5, {
+        width: 43,
+        align: "right",
+      });
+
+      currentY += 12;
+    }
+    if (pi.transport_payment_status === "PAID") {
+      doc
+        .font("Helvetica-Bold")
+        .fillColor("green")
+        .text("TRANSPORT PAID", leftCol + 350, tableTop + 10, { rotate: 0 });
+      doc.fillColor("black"); // reset color
+    }
+
     doc.font("Helvetica-Bold").text("Total", leftCol + 32, currentY + 6);
     doc.text(grandTotal.toFixed(2), leftCol + 472, currentY + 6, {
       width: 43,
