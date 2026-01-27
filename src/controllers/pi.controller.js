@@ -199,7 +199,11 @@ exports.cancelPI = async (req, res) => {
 
   try {
     const pi = await ProformaInvoice.findByPk(req.params.id, {
-      include: [{ model: PIItem, as: "items" }],
+      include: [{
+        model: PIItem,
+        as: "items",
+        attributes: ["id", "product_id", "qty", "batch_info"],
+      }],
       transaction: t,
       lock: t.LOCK.UPDATE,
     });
@@ -225,7 +229,6 @@ exports.cancelPI = async (req, res) => {
 
       stock.available_qty += item.qty;
       stock.reserved_qty -= item.qty;
-
       if (stock.reserved_qty < 0) stock.reserved_qty = 0;
 
       await stock.save({ transaction: t });
@@ -236,16 +239,21 @@ exports.cancelPI = async (req, res) => {
 
       for (const b of batches) {
         const hideStock = await LeatherHideStock.findOne({
-          where: { hide_id: b.hide_id },
+          where: { hide_id: b.hide_id }, 
           transaction: t,
           lock: t.LOCK.UPDATE,
         });
 
-        if (hideStock) {
-          hideStock.qty += b.qty;
-          hideStock.status = "AVAILABLE";
-          await hideStock.save({ transaction: t });
+        if (!hideStock) {
+          throw new Error(
+            `HideStock not found while cancelling PI (hide_id=${b.hide_id})`
+          );
         }
+
+        hideStock.qty += b.qty;
+        hideStock.status = "AVAILABLE";
+
+        await hideStock.save({ transaction: t });
       }
     }
 
@@ -257,9 +265,11 @@ exports.cancelPI = async (req, res) => {
 
   } catch (err) {
     await t.rollback();
+    console.error("Cancel PI Error:", err);
     res.status(400).json({ error: err.message });
   }
 };
+
 exports.downloadPI = async (req, res) => {
   try {
     const pi = await ProformaInvoice.findByPk(req.params.id, {
