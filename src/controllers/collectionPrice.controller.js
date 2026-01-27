@@ -95,20 +95,22 @@ exports.getById = async (req, res) => {
 
 exports.update = async (req, res) => {
   try {
-    const price = await CollectionPrice.findByPk(req.params.id);
+    const { price, price_type, collection_series_id, is_active } = req.body;
 
-    if (!price) {
+    const priceRecord = await CollectionPrice.findByPk(req.params.id);
+
+    if (!priceRecord) {
       return res.status(404).json({ message: "Price not found" });
     }
 
-    await price.update({
+    await priceRecord.update({
       price,
       price_type,
       collection_series_id,
       is_active,
     });
 
-    res.json(price);
+    res.json(priceRecord);
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: "Failed to update price" });

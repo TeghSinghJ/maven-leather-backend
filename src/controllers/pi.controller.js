@@ -193,7 +193,9 @@ exports.getPIs = async (req, res) => {
   }
 };
 exports.cancelPI = async (req, res) => {
-  const t = await sequelize.transaction();
+  const t = await sequelize.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  });
 
   try {
     const pi = await ProformaInvoice.findByPk(req.params.id, {
@@ -203,7 +205,8 @@ exports.cancelPI = async (req, res) => {
     });
 
     if (!pi) throw new Error("PI not found");
-    if (pi.status !== "ACTIVE") throw new Error("Only ACTIVE PI can be cancelled");
+    if (pi.status !== "ACTIVE")
+      throw new Error("Only ACTIVE PI can be cancelled");
 
     const productIds = pi.items.map(i => i.product_id);
 
@@ -218,22 +221,45 @@ exports.cancelPI = async (req, res) => {
 
     for (const item of pi.items) {
       const stock = stockMap[item.product_id];
+      if (!stock) continue;
+
       stock.available_qty += item.qty;
       stock.reserved_qty -= item.qty;
+
+      if (stock.reserved_qty < 0) stock.reserved_qty = 0;
+
       await stock.save({ transaction: t });
+    }
+
+    for (const item of pi.items) {
+      const batches = item.batch_info || [];
+
+      for (const b of batches) {
+        const hideStock = await LeatherHideStock.findOne({
+          where: { hide_id: b.hide_id },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+
+        if (hideStock) {
+          hideStock.qty += b.qty;
+          hideStock.status = "AVAILABLE";
+          await hideStock.save({ transaction: t });
+        }
+      }
     }
 
     pi.status = "CANCELLED";
     await pi.save({ transaction: t });
 
     await t.commit();
-    res.json({ message: "PI cancelled and stock released" });
+    res.json({ message: "PI cancelled and stock fully restored" });
+
   } catch (err) {
     await t.rollback();
     res.status(400).json({ error: err.message });
   }
 };
-
 exports.downloadPI = async (req, res) => {
   try {
     const pi = await ProformaInvoice.findByPk(req.params.id, {
