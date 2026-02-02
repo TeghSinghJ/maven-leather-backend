@@ -13,6 +13,10 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: "transport_type_id",
         as: "transportType",
       });
+      ProformaInvoice.belongsTo(models.Customer, {
+        foreignKey: "customer_id",
+        as: "customer",
+      });
 
       ProformaInvoice.belongsTo(models.Transport, {
         foreignKey: "transport_id",
@@ -23,17 +27,20 @@ module.exports = (sequelize, DataTypes) => {
 
   ProformaInvoice.init(
     {
-      customer_name: { type: DataTypes.STRING, allowNull: false },
-      whatsapp_number: DataTypes.STRING,
-      address: DataTypes.STRING,
-      state: DataTypes.STRING,
-      gst_number: DataTypes.STRING,
-      contact_number: DataTypes.STRING,
-      pin_code: DataTypes.STRING,
+      customer_id: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+      },
 
       status: {
-        type: DataTypes.ENUM("ACTIVE", "EXPIRED", "CONFIRMED", "CANCELLED"),
-        defaultValue: "ACTIVE",
+        type: DataTypes.ENUM(
+          "ACTIVE",
+          "PENDING_APPROVAL",
+          "CONFIRMED",
+          "EXPIRED",
+          "CANCELLED",
+        ),
+        defaultValue: "PENDING_APPROVAL",
       },
 
       expires_at: DataTypes.DATE,

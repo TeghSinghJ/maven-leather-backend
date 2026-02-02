@@ -20,17 +20,17 @@ module.exports = (sequelize, DataTypes) => {
       pi_id: DataTypes.INTEGER,
       product_id: DataTypes.INTEGER,
       qty: DataTypes.FLOAT,
-      rate:DataTypes.FLOAT,
-       batch_info: {
-      type: DataTypes.JSON,
-      allowNull: true,
+      rate: DataTypes.FLOAT,
+      batch_info: {
+        type: DataTypes.JSON,
+        allowNull: true,
+      },
     },
-  },
     {
       sequelize,
       modelName: "PIItem",
       tableName: "pi_items",
-    }
+    },
   );
 
   return PIItem;

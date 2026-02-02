@@ -1,3 +1,4 @@
+const { Op } = require("sequelize");
 const { LeatherHideStock } = require("../../models");
 const { recalculateLeatherStock } = require("../services/leatherStock.service");
 
@@ -48,7 +49,14 @@ exports.createBulkHideStock = async (req, res) => {
 exports.listByProduct = async (req, res) => {
   try {
     const { productId } = req.params;
-    const hides = await LeatherHideStock.findAll({ where: { product_id: productId } });
+
+    const hides = await LeatherHideStock.findAll({
+      where: {
+        product_id: productId,
+        qty: { [Op.gt]: 0 }, 
+      },
+    });
+
     res.json(hides);
   } catch (err) {
     console.error(err);

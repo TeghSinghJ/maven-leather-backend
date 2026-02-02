@@ -1,3 +1,4 @@
+require("dotenv").config();
 require("./src/jobs/expire.pi.job");
 const app = require("./app");
 
