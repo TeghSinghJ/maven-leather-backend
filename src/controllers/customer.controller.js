@@ -4,46 +4,36 @@ const XLSX = require('xlsx');
 const { Customer, sequelize } = require('../../models');
 
 exports.bulkUpload = async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'CSV/Excel file is required' });
-  }
+  if (!req.file) return res.status(400).json({ error: 'CSV/Excel file is required' });
 
   const transaction = await sequelize.transaction();
 
   try {
     const workbook = XLSX.readFile(req.file.path);
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json(sheet);
+    let rows = XLSX.utils.sheet_to_json(sheet);
 
-    if (!rows.length) {
-      return res.status(400).json({ error: 'Uploaded file is empty' });
-    }
+    rows = rows.map(row => {
+      const newRow = {};
+      Object.keys(row).forEach(key => {
+        newRow[key.trim()] = typeof row[key] === 'string' ? row[key].trim() : row[key];
+      });
+      return newRow;
+    });
+
+    if (!rows.length) return res.status(400).json({ error: 'Uploaded file is empty' });
 
     for (const row of rows) {
-      /* ---------- Normalize Columns ---------- */
-      const customer_name =
-        row.customer_name ||
-        row.Customer_Name ||
-        row.name ||
-        row.customer;
+      const customer_name = row.customer_name || row.Customer_Name || row.name || row.customer;
+      if (!customer_name) continue;
 
-      if (!customer_name) {
-        console.log('Skipping row without customer_name', row);
-        continue;
-      }
-
-      const contact_number =
-        row.contact_number || row.mobile || row.phone || null;
-
-      const whatsapp_number =
-        row.whatsapp_number || row.whatsapp || null;
-
+      const contact_number = row.contact_number || row.mobile || row.phone || null;
+      const whatsapp_number = row.whatsapp_number || row.whatsapp || null;
       const address = row.address || null;
       const state = row.state || null;
       const pin_code = row.pin_code || null;
       const gst_number = row.gst_number || row.gst || null;
 
-      /* ---------- Avoid duplicates (GST / Mobile) ---------- */
       const where = {};
       if (gst_number) where.gst_number = gst_number;
       else if (contact_number) where.contact_number = contact_number;
@@ -66,18 +56,10 @@ exports.bulkUpload = async (req, res) => {
     }
 
     await transaction.commit();
-
-    res.json({
-      message: 'Customers bulk uploaded successfully',
-      total_rows: rows.length,
-    });
+    res.json({ message: 'Customers bulk uploaded successfully', total_rows: rows.length });
   } catch (error) {
     await transaction.rollback();
-    console.error(error);
-    res.status(500).json({
-      error: 'Bulk upload failed',
-      message: error.message,
-    });
+    res.status(500).json({ error: 'Bulk upload failed', message: error.message });
   }
 };
 
