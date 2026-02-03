@@ -18,7 +18,7 @@ exports.createPI = async (req, res) => {
   try {
     const {
       customer_id,
-      items, // now each item must include: product_id, qty, hide_id
+      items,
       price_type,
       delivery_address,
       transport_type_id,
@@ -31,7 +31,6 @@ exports.createPI = async (req, res) => {
       throw new Error('No items provided for PI');
     }
 
-    // Calculate transport amount
     let transportAmount = 0;
     if (transport_type_id && weight_kg) {
       const transportType = await TransportType.findByPk(transport_type_id, { transaction: t });
@@ -40,7 +39,6 @@ exports.createPI = async (req, res) => {
     }
     const finalTransportAmount = transport_payment_status === 'PAID' ? 0 : transportAmount;
 
-    // Create PI
     const pi = await ProformaInvoice.create(
       {
         customer_id,
@@ -56,48 +54,64 @@ exports.createPI = async (req, res) => {
       { transaction: t }
     );
 
-    // Allocate each item from the selected batch
     for (const item of items) {
-      const { product_id, qty, hide_id } = item;
-      if (!product_id || !qty || !hide_id) throw new Error('Invalid item payload');
+      const { product_id, qty, batch_no, hides } = item;
 
-      // Lock the selected batch
-      const hideStock = await LeatherHideStock.findOne({
-        where: { hide_id, status: 'AVAILABLE' },
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      });
-
-      if (!hideStock || hideStock.qty < qty) {
-        throw new Error(`Selected batch does not have enough stock for product ${product_id}`);
+      if (!product_id || !qty || !Array.isArray(hides) || hides.length === 0) {
+        throw new Error('Invalid item payload: product_id, qty, and hides are required');
       }
 
-      // Lock aggregate stock
+      let allocatedQty = 0;
+      const batchInfo = [];
+
+      for (const h of hides) {
+        const { hide_id, hide_qty } = h;
+
+        const hideStock = await LeatherHideStock.findOne({
+          where: { hide_id, status: 'AVAILABLE', batch_no },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+
+        if (!hideStock) throw new Error(`Hide ${hide_id} in batch ${batch_no} not available`);
+        if (hideStock.qty < hide_qty) throw new Error(`Hide ${hide_id} in batch ${batch_no} has insufficient quantity`);
+
+        hideStock.qty -= hide_qty;
+        hideStock.status = hideStock.qty === 0 ? 'RESERVED' : 'AVAILABLE';
+        await hideStock.save({ transaction: t });
+
+        batchInfo.push({ hide_id, batch_no, qty: hide_qty, collection_series_id: hideStock.collection_series_id });
+        allocatedQty += hide_qty;
+      }
+
+      if (allocatedQty !== qty) throw new Error(`Allocated quantity (${allocatedQty}) does not match requested quantity (${qty}) for product ${product_id}`);
+
       const leatherStock = await LeatherStock.findOne({
         where: { product_id },
         transaction: t,
         lock: t.LOCK.UPDATE,
       });
-      if (!leatherStock || leatherStock.available_qty < qty) throw new Error(`Insufficient stock for product ${product_id}`);
 
-      // Deduct stock
-      hideStock.qty -= qty;
-      hideStock.status = hideStock.qty === 0 ? 'RESERVED' : 'AVAILABLE';
-      await hideStock.save({ transaction: t });
+      if (!leatherStock || leatherStock.available_qty < qty) throw new Error(`Insufficient overall stock for product ${product_id}`);
 
       leatherStock.available_qty -= qty;
       leatherStock.reserved_qty += qty;
       await leatherStock.save({ transaction: t });
 
-      // Create PIItem
       const priceObj = await CollectionPrice.findOne({
-        where: { collection_series_id: hideStock.collection_series_id, price_type },
+        where: { collection_series_id: batchInfo[0].collection_series_id, price_type },
         transaction: t,
       });
       if (!priceObj) throw new Error('Price not defined for product');
 
       await PIItem.create(
-        { pi_id: pi.id, product_id, qty, rate: priceObj.price, batch_info: [{ hide_id, batch_no: hideStock.batch_no, qty }] },
+        {
+          pi_id: pi.id,
+          product_id,
+          qty,
+          rate: priceObj.price,
+          batch_info: batchInfo,
+        },
         { transaction: t }
       );
     }
@@ -110,7 +124,6 @@ exports.createPI = async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 };
-
 
 exports.getPIs = async (req, res) => {
   try {
@@ -211,31 +224,30 @@ exports.getPIById = async (req, res) => {
       return res.status(404).json({ error: "Proforma Invoice not found" });
     }
 
-    // 🔹 Aggregate batch_info per batch_no for each item
-    const itemsWithAggregatedBatches = pi.items.map((item) => {
+    const items = pi.items.map((item) => {
       const batchMap = {};
 
       (item.batch_info || []).forEach((b) => {
-        if (!batchMap[b.batch_no]) batchMap[b.batch_no] = 0;
-        batchMap[b.batch_no] += b.qty;
+        if (!batchMap[b.batch_no]) {
+          batchMap[b.batch_no] = {
+            batch_no: b.batch_no,
+            qty: 0,
+          };
+        }
+        batchMap[b.batch_no].qty += b.qty;
       });
-
-      const aggregatedBatchInfo = Object.entries(batchMap).map(
-        ([batch_no, qty]) => ({ batch_no, qty })
-      );
 
       return {
         ...item.toJSON(),
-        batch_info: aggregatedBatchInfo,
+        batch_summary: Object.values(batchMap),
+        batch_info: item.batch_info, // 🔒 keep hide-level truth
       };
     });
 
-    const piResponse = {
+    res.json({
       ...pi.toJSON(),
-      items: itemsWithAggregatedBatches,
-    };
-
-    res.json(piResponse);
+      items,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -553,9 +565,7 @@ exports.revisitPI = async (req, res) => {
 };
 
 /**
- * Suggest batches for requested product quantity
- * - Checks first sufficient batch
- * - If not available, suggest nearby batches ±5 or ±10
+ * Suggest batches for requested product quantity (HIDE-LEVEL)
  */
 exports.suggestBatch = async (req, res) => {
   const t = await sequelize.transaction({
@@ -584,59 +594,99 @@ exports.suggestBatch = async (req, res) => {
         attributes: ["batch_no", "qty"],
         transaction: t,
         lock: t.LOCK.SHARE,
+        raw: true,
       });
 
       if (!hides.length) {
         response.push({
           product_id,
           requested_qty,
-          exactBatchAvailable: false,
+          exactMatch: false,
           suggestions: [],
-          reason: "No available batches",
+          reason: "No available hides",
         });
         continue;
       }
 
-      const batchTotals = {};
+      const batchMap = {};
       for (const h of hides) {
-        batchTotals[h.batch_no] =
-          (batchTotals[h.batch_no] || 0) + Number(h.qty);
+        if (!batchMap[h.batch_no]) batchMap[h.batch_no] = [];
+        batchMap[h.batch_no].push(Number(h.qty));
       }
 
-      const batches = Object.entries(batchTotals).map(
-        ([batch_no, available_qty]) => ({
-          batch_no,
-          available_qty,
-        })
-      );
+      const batchResults = [];
 
-      const exactBatch = batches.find(b => b.available_qty === requested_qty);
-      if (exactBatch) {
+      for (const [batch_no, hideQtys] of Object.entries(batchMap)) {
+        hideQtys.sort((a, b) => b - a);
+
+        let runningSum = 0;
+        const selectedHides = [];
+
+        for (const q of hideQtys) {
+          runningSum += q;
+          selectedHides.push(q);
+
+          if (runningSum >= requested_qty) break;
+        }
+
+        if (selectedHides.length === 0) continue;
+
+        const diff = Number((runningSum - requested_qty).toFixed(2));
+
+        batchResults.push({
+          batch_no,
+          allocated_qty: Number(runningSum.toFixed(2)),
+          difference: diff,
+          hides: selectedHides.map(q => ({ hide_qty: q })),
+        });
+      }
+
+      if (!batchResults.length) {
         response.push({
           product_id,
           requested_qty,
-          exactBatchAvailable: true,
-          suggested_batch: exactBatch,
+          exactMatch: false,
           suggestions: [],
+          reason: "No valid hide combinations",
         });
         continue;
       }
 
-      const deltas = Array.from({ length: 10 }, (_, i) => i + 1); // [1,2,...,10]
-      const suggestions = batches.filter(b =>
-        deltas.some(
-          d =>
-            b.available_qty === requested_qty - d ||
-            b.available_qty === requested_qty + d
-        )
+      const exactMatches = batchResults.filter(b => b.difference === 0);
+      if (exactMatches.length) {
+        response.push({
+          product_id,
+          requested_qty,
+          exactMatch: true,
+          suggestions: exactMatches,
+        });
+        continue;
+      }
+
+      const nearMatches = batchResults.filter(
+        b => Math.abs(b.difference) <= 10
       );
 
+      if (nearMatches.length) {
+        response.push({
+          product_id,
+          requested_qty,
+          exactMatch: false,
+          suggestions: nearMatches.sort(
+            (a, b) => Math.abs(a.difference) - Math.abs(b.difference)
+          ),
+        });
+        continue;
+      }
       response.push({
         product_id,
         requested_qty,
-        exactBatchAvailable: false,
-        suggested_batch: null,
-        suggestions,
+        exactMatch: false,
+        suggestions: batchResults.sort(
+          (a, b) => Math.abs(a.difference) - Math.abs(b.difference)
+        ),
+        reason:
+          "No batch matched within ±10. Showing closest available batches.",
       });
     }
 
@@ -644,7 +694,7 @@ exports.suggestBatch = async (req, res) => {
     res.json(response);
   } catch (err) {
     await t.rollback();
-    console.error(err);
+    console.error("suggestBatch error:", err);
     res.status(400).json({ error: err.message });
   }
 };
@@ -847,6 +897,11 @@ exports.getPendingApprovalPIs = async (req, res) => {
               attributes: ["leather_code", "color", "image_url"],
             },
           ],
+        },
+        {
+          model: Customer,
+          as: "customer",
+          attributes: ["customer_name", "address"],
         },
       ],
       order: [["createdAt", "DESC"]],

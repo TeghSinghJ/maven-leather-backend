@@ -1,4 +1,4 @@
-const { LeatherProduct, LeatherStock,LeatherHideStock, sequelize } = require("../../models");
+const { LeatherProduct, LeatherStock,LeatherHideStock,CollectionPrice, sequelize } = require("../../models");
 const { body, validationResult } = require("express-validator");
 const { Op, fn ,col} = require("sequelize"); // 👈 REQUIRED
 
@@ -104,7 +104,6 @@ exports.getProducts = async (req, res) => {
   }
 };
 
-/* ================= GET SINGLE PRODUCT ================= */
 exports.getProductById = async (req, res) => {
   try {
     const product = await LeatherProduct.findByPk(req.params.id, {
@@ -176,19 +175,51 @@ exports.getAvailableProducts = async (req, res) => {
       ],
 
       attributes: {
-        include: [
-          [fn("SUM", col("batches.qty")), "available_qty"],
-        ],
+        include: [[fn("SUM", col("batches.qty")), "available_qty"]],
       },
 
       group: ["LeatherProduct.id"],
       order: [["createdAt", "DESC"]],
-      raw: true, 
+      raw: true,
     });
 
-    const result = products.map((p) => ({
+    if (!products.length) return res.json([]);
+
+    const seriesIds = [
+      ...new Set(products.map(p => p.collection_series_id)),
+    ];
+
+    const prices = await CollectionPrice.findAll({
+      where: {
+        collection_series_id: { [Op.in]: seriesIds },
+        is_active: true,
+      },
+      attributes: [
+        "collection_series_id",
+        "price_type",
+        "price",
+      ],
+      raw: true,
+    });
+
+    const priceMap = {};
+
+    prices.forEach(p => {
+      if (!priceMap[p.collection_series_id]) {
+        priceMap[p.collection_series_id] = {};
+      }
+      priceMap[p.collection_series_id][p.price_type] = p.price;
+    });
+
+    const result = products.map(p => ({
       ...p,
       available_qty: Math.floor(Number(p.available_qty || 0) * 100) / 100,
+
+      quantity_price: {
+        DP: priceMap[p.collection_series_id]?.DP || 0,
+        RRP: priceMap[p.collection_series_id]?.RRP || 0,
+        ARCH: priceMap[p.collection_series_id]?.ARCH || 0,
+      },
     }));
 
     res.json(result);

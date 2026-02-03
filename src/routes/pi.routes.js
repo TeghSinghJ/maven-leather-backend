@@ -19,7 +19,7 @@ router.get("/:id/download", controller.downloadPI);
 
 // Suggest batch for requested quantity
 router.post("/suggest-batch", controller.suggestBatch);
-router.post("/confirmed", controller.createPIConfirmed); // confirmed batch PI
+router.post("/confirmed", controller.createPIConfirmed); 
 router.get("/pending/approval", controller.getPendingApprovalPIs);
 router.get("/:id", controller.getPIById);
 router.post("/:id/approve", controller.adminApprovePI);
