@@ -574,24 +574,51 @@ exports.suggestBatch = async (req, res) => {
 
   try {
     const { items } = req.body;
-
-    if (!Array.isArray(items) || items.length === 0) {
-      throw new Error("No items provided");
-    }
+    if (!Array.isArray(items) || items.length === 0) throw new Error("No items provided");
 
     const response = [];
 
-    for (const { product_id, requested_qty } of items) {
-      if (!product_id || !requested_qty) {
-        throw new Error("product_id and requested_qty are required");
+    const allocateHidesGreedy = (hideList, requested_qty) => {
+      const validHides = hideList.filter((h) => h.qty > 0);
+      if (validHides.length === 0) return null;
+
+      const sorted = validHides.slice().sort((a, b) => a.qty - b.qty);
+      let allocation = [];
+      let runningSum = 0;
+
+      for (const h of sorted) {
+        if (runningSum + h.qty <= requested_qty) {
+          allocation.push({ hide_id: h.hide_id, hide_qty: h.qty });
+          runningSum += h.qty;
+        }
       }
 
+      let closestSum = runningSum;
+      let bestAllocation = [...allocation];
+      for (const h of sorted) {
+        if (!allocation.find((x) => x.hide_id === h.hide_id)) {
+          const newSum = runningSum + h.qty;
+          if (Math.abs(newSum - requested_qty) < Math.abs(closestSum - requested_qty)) {
+            bestAllocation = [...allocation, { hide_id: h.hide_id, hide_qty: h.qty }];
+            closestSum = newSum;
+          }
+        }
+      }
+
+      return {
+        allocated_qty: closestSum,
+        difference: Number((closestSum - requested_qty).toFixed(2)),
+        hides: bestAllocation,
+      };
+    };
+
+    for (const { product_id, requested_qty } of items) {
+      if (!product_id || requested_qty == null)
+        throw new Error("product_id and requested_qty are required");
+
       const hides = await LeatherHideStock.findAll({
-        where: {
-          product_id,
-          status: "AVAILABLE",
-        },
-        attributes: ["batch_no", "qty"],
+        where: { product_id, status: "AVAILABLE" },
+        attributes: ["batch_no", "qty", "hide_id"],
         transaction: t,
         lock: t.LOCK.SHARE,
         raw: true,
@@ -611,34 +638,34 @@ exports.suggestBatch = async (req, res) => {
       const batchMap = {};
       for (const h of hides) {
         if (!batchMap[h.batch_no]) batchMap[h.batch_no] = [];
-        batchMap[h.batch_no].push(Number(h.qty));
+        batchMap[h.batch_no].push({ qty: Number(h.qty), hide_id: h.hide_id });
       }
 
       const batchResults = [];
 
-      for (const [batch_no, hideQtys] of Object.entries(batchMap)) {
-        hideQtys.sort((a, b) => b - a);
+      for (const [batch_no, hideList] of Object.entries(batchMap)) {
+        const allocation = allocateHidesGreedy(hideList, requested_qty);
 
-        let runningSum = 0;
-        const selectedHides = [];
+        if (!allocation || allocation.hides.length === 0) {
+          // Filter nearby hides only: within ±20% of requested quantity
+          const tolerance = requested_qty * 0.2;
+          const nearbyHides = hideList
+            .filter((h) => Math.abs(h.qty - requested_qty) <= tolerance)
+            .map((h) => ({ hide_id: h.hide_id, hide_qty: h.qty }));
 
-        for (const q of hideQtys) {
-          runningSum += q;
-          selectedHides.push(q);
-
-          if (runningSum >= requested_qty) break;
+          batchResults.push({
+            batch_no,
+            allocated_qty: 0,
+            difference: Number((0 - requested_qty).toFixed(2)),
+            hides: nearbyHides,
+            reason:
+              nearbyHides.length > 0
+                ? "Requested quantity not fully available, showing nearby hides"
+                : "Requested quantity not available, no nearby hides found",
+          });
+        } else {
+          batchResults.push({ batch_no, ...allocation });
         }
-
-        if (selectedHides.length === 0) continue;
-
-        const diff = Number((runningSum - requested_qty).toFixed(2));
-
-        batchResults.push({
-          batch_no,
-          allocated_qty: Number(runningSum.toFixed(2)),
-          difference: diff,
-          hides: selectedHides.map(q => ({ hide_qty: q })),
-        });
       }
 
       if (!batchResults.length) {
@@ -652,7 +679,7 @@ exports.suggestBatch = async (req, res) => {
         continue;
       }
 
-      const exactMatches = batchResults.filter(b => b.difference === 0);
+      const exactMatches = batchResults.filter((b) => b.difference === 0);
       if (exactMatches.length) {
         response.push({
           product_id,
@@ -663,30 +690,27 @@ exports.suggestBatch = async (req, res) => {
         continue;
       }
 
-      const nearMatches = batchResults.filter(
-        b => Math.abs(b.difference) <= 10
-      );
+      const nearMatches = batchResults
+        .filter((b) => Math.abs(b.difference) <= 10)
+        .sort((a, b) => Math.abs(a.difference) - Math.abs(b.difference));
 
       if (nearMatches.length) {
         response.push({
           product_id,
           requested_qty,
           exactMatch: false,
-          suggestions: nearMatches.sort(
-            (a, b) => Math.abs(a.difference) - Math.abs(b.difference)
-          ),
+          suggestions: nearMatches,
         });
         continue;
       }
+
+      // Fallback
       response.push({
         product_id,
         requested_qty,
         exactMatch: false,
-        suggestions: batchResults.sort(
-          (a, b) => Math.abs(a.difference) - Math.abs(b.difference)
-        ),
-        reason:
-          "No batch matched within ±10. Showing closest available batches.",
+        suggestions: batchResults.sort((a, b) => Math.abs(a.difference) - Math.abs(b.difference)),
+        reason: "No batch matched within ±10. Showing closest available batches or nearby hides.",
       });
     }
 
@@ -709,8 +733,7 @@ exports.createPIConfirmed = async (req, res) => {
 
     if (!customer_id) throw new Error("customer_id required");
     if (!price_type) throw new Error("price_type required");
-    if (!Array.isArray(items) || items.length === 0)
-      throw new Error("No items");
+    if (!Array.isArray(items) || items.length === 0) throw new Error("No items provided");
 
     // 1️⃣ Create PI
     const pi = await ProformaInvoice.create(
@@ -724,39 +747,42 @@ exports.createPIConfirmed = async (req, res) => {
 
     // 2️⃣ Process each item
     for (const item of items) {
-      const { product_id, batch_no, collection_series_id } = item;
+      const { product_id, batch_no, hides, collection_series_id } = item;
 
-      // 🔒 Lock all hides of the selected batch
-      const hides = await LeatherHideStock.findAll({
-        where: {
-          product_id,
-          batch_no,
-          status: "AVAILABLE",
-        },
-        order: [["id", "ASC"]],
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      });
-
-      if (!hides.length) {
-        throw new Error(`No stock found for batch ${batch_no}`);
+      if (!Array.isArray(hides) || hides.length === 0) {
+        throw new Error(`No hides selected for product ${product_id} batch ${batch_no}`);
       }
 
-      // 3️⃣ Consume FULL batch qty
-      let batchTotalQty = 0;
+      // 🔒 Lock selected hides
+      const hideIds = hides.map((h) => h.hide_id);
+      const hideRecords = await LeatherHideStock.findAll({
+        where: { hide_id: hideIds, status: "AVAILABLE" },
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+        order: [["id", "ASC"]],
+      });
+
+      if (hideRecords.length !== hides.length) {
+        throw new Error(`Some hides are no longer available for batch ${batch_no}`);
+      }
+
+      // 3️⃣ Reserve hides
+      let allocatedQty = 0;
       const batchInfo = [];
 
-      for (const h of hides) {
-        batchTotalQty += h.qty;
+      for (const h of hideRecords) {
+        const hideQty = hides.find((x) => x.hide_id === h.hide_id).hide_qty;
 
+        allocatedQty += hideQty;
         batchInfo.push({
           hide_id: h.hide_id,
           batch_no,
-          qty: h.qty,
+          qty: hideQty,
         });
 
-        h.status = "RESERVED";
-        h.qty = 0;
+        // Update hide stock
+        h.qty -= hideQty;
+        if (h.qty <= 0) h.status = "RESERVED";
         await h.save({ transaction: t });
       }
 
@@ -767,15 +793,15 @@ exports.createPIConfirmed = async (req, res) => {
         lock: t.LOCK.UPDATE,
       });
 
-      if (!stock || stock.available_qty < batchTotalQty) {
-        throw new Error("Insufficient product stock");
+      if (!stock || stock.available_qty < allocatedQty) {
+        throw new Error(`Insufficient stock for product ${product_id}`);
       }
 
-      stock.available_qty -= batchTotalQty;
-      stock.reserved_qty += batchTotalQty;
+      stock.available_qty -= allocatedQty;
+      stock.reserved_qty += allocatedQty;
       await stock.save({ transaction: t });
 
-      // 5️⃣ Fetch price (CORRECT WAY)
+      // 5️⃣ Fetch price
       const price = await CollectionPrice.findOne({
         where: {
           collection_series_id,
@@ -785,16 +811,14 @@ exports.createPIConfirmed = async (req, res) => {
         transaction: t,
       });
 
-      if (!price) {
-        throw new Error(`Price not found for ${price_type}`);
-      }
+      if (!price) throw new Error(`Price not found for ${price_type}`);
 
       // 6️⃣ Create PI Item
       await PIItem.create(
         {
           pi_id: pi.id,
           product_id,
-          qty: batchTotalQty, // FULL batch qty
+          qty: allocatedQty,
           rate: price.price,
           batch_info: batchInfo,
         },
@@ -809,6 +833,7 @@ exports.createPIConfirmed = async (req, res) => {
     });
   } catch (err) {
     await t.rollback();
+    console.error("createPIConfirmed error:", err);
     res.status(400).json({ error: err.message });
   }
 };
