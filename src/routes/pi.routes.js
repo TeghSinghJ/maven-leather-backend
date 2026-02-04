@@ -8,19 +8,16 @@ router.post("/", controller.createPI);
 // Get all PIs
 router.get("/", controller.getPIs);
 
-// Cancel a PI
-router.post("/:id/cancel", controller.cancelPI);
-
-// Revisit/Update a PI
-router.put("/:id/revisit", controller.revisitPI);
-
-// Download PI PDF
-router.get("/:id/download", controller.downloadPI);
-
-// Suggest batch for requested quantity
+// Specific routes MUST come before :id routes
 router.post("/suggest-batch", controller.suggestBatch);
-router.post("/confirmed", controller.createPIConfirmed); 
+router.post("/confirmed", controller.createPIConfirmed);
 router.get("/pending/approval", controller.getPendingApprovalPIs);
-router.get("/:id", controller.getPIById);
+
+// ID-based routes
+router.post("/:id/cancel", controller.cancelPI);
 router.post("/:id/approve", controller.adminApprovePI);
+router.put("/:id/revisit", controller.revisitPI);
+router.get("/:id/download", controller.downloadPI);
+router.get("/:id", controller.getPIById);
+
 module.exports = router;

@@ -259,6 +259,10 @@ module.exports = function generateExactPIPdf(res, pi) {
     if (pi.transport_payment_status === "TO_BE_PAID" && pi.transport_amount) {
       transportCharge = pi.transport_amount;
       grandTotal += transportCharge;
+    } else if (pi.transport_amount && pi.transport_amount > 0) {
+      // Show transport charge even if PAID status
+      transportCharge = pi.transport_amount;
+      grandTotal += transportCharge;
     }
 
     if (sameState) {
@@ -286,10 +290,15 @@ module.exports = function generateExactPIPdf(res, pi) {
 
     currentY = tableTop + 300;
     doc.moveTo(40, currentY).lineTo(555, currentY).stroke();
-    if (
-      pi.transport_payment_status === "TO_BE_PAID" &&
-      pi.transport_amount > 0
-    ) {
+    
+    // Log for debugging
+    console.log("PDF Transport Debug:", {
+      transport_amount: pi.transport_amount,
+      transport_payment_status: pi.transport_payment_status,
+      type: typeof pi.transport_amount,
+    });
+    
+    if (pi.transport_amount && pi.transport_amount > 0) {
       doc
         .font("Helvetica")
         .fontSize(8)
@@ -302,6 +311,7 @@ module.exports = function generateExactPIPdf(res, pi) {
 
       currentY += 12;
     }
+
     if (pi.transport_payment_status === "PAID") {
       doc
         .font("Helvetica-Bold")

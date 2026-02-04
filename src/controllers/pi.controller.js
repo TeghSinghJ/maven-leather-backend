@@ -12,6 +12,100 @@ const {
 } = require("../../models");
 const { Op ,Transaction} = require("sequelize");
 const generateExactPIPdf = require("../utils/piPdf");
+
+/**
+ * Utility: Find optimal hide combinations for a requested quantity
+ * Returns combinations sorted by closeness to requested quantity
+ */
+const findOptimalHidesCombinations = (hideList, requested_qty, tolerance = 1) => {
+  if (hideList.length === 0) return [];
+
+  // Normalize hides: ensure numeric qty and stable order (largest first helps greedy fallback)
+  const normalized = hideList
+    .map(h => ({ hide_id: h.hide_id, qty: Number(h.qty) }))
+    .filter(h => h.qty > 0)
+    .sort((a, b) => b.qty - a.qty);
+
+  const combinations = [];
+  const n = normalized.length;
+
+  // Safety: exhaustive search only for reasonably small n (<=20)
+  const MAX_EXHAUSTIVE = 20;
+
+  if (n <= MAX_EXHAUSTIVE) {
+    for (let mask = 1; mask < (1 << n); mask++) {
+      let total = 0;
+      const selectedHides = [];
+
+      for (let i = 0; i < n; i++) {
+        if (mask & (1 << i)) {
+          selectedHides.push(normalized[i]);
+          total += normalized[i].qty;
+        }
+      }
+
+      const difference = total - requested_qty;
+      const absDistance = Math.abs(difference);
+
+      combinations.push({
+        allocated_qty: Number(total.toFixed(2)),
+        difference: Number(difference.toFixed(2)),
+        distance: absDistance,
+        hides: selectedHides.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+        withinTolerance: absDistance <= tolerance,
+      });
+    }
+  } else {
+    // Greedy fallback for large hide sets: try prefix sums and some top-k combinations
+    let running = 0;
+    const sel = [];
+    for (const h of normalized) {
+      if (running >= requested_qty) break;
+      sel.push(h);
+      running += h.qty;
+    }
+    combinations.push({
+      allocated_qty: Number(running.toFixed(2)),
+      difference: Number((running - requested_qty).toFixed(2)),
+      distance: Math.abs(Number((running - requested_qty).toFixed(2))),
+      hides: sel.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+      withinTolerance: Math.abs(running - requested_qty) <= tolerance,
+    });
+
+    // try single largest + neighbours
+    for (let i = 0; i < Math.min(10, n); i++) {
+      let total = normalized[i].qty;
+      const selected = [normalized[i]];
+      for (let j = i + 1; j < Math.min(i + 6, n); j++) {
+        if (total >= requested_qty) break;
+        total += normalized[j].qty;
+        selected.push(normalized[j]);
+      }
+      combinations.push({
+        allocated_qty: Number(total.toFixed(2)),
+        difference: Number((total - requested_qty).toFixed(2)),
+        distance: Math.abs(Number((total - requested_qty).toFixed(2))),
+        hides: selected.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+        withinTolerance: Math.abs(total - requested_qty) <= tolerance,
+      });
+    }
+  }
+
+  // Sort by closest match first (distance). For equal distance prefer larger allocated_qty (less shortfall)
+  combinations.sort((a, b) => {
+    if (a.distance !== b.distance) return a.distance - b.distance;
+    return b.allocated_qty - a.allocated_qty;
+  });
+
+  // Return top 5: prioritize within tolerance, then closest matches
+  const withinTolerance = combinations.filter(c => c.withinTolerance);
+  const outsideTolerance = combinations.filter(c => !c.withinTolerance);
+
+  return [
+    ...withinTolerance.slice(0, 5),
+    ...outsideTolerance.slice(0, Math.max(0, 5 - withinTolerance.length)),
+  ];
+};
 exports.createPI = async (req, res) => {
   const t = await sequelize.transaction({ isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED });
 
@@ -128,6 +222,16 @@ exports.createPI = async (req, res) => {
 exports.getPIs = async (req, res) => {
   try {
     const pis = await ProformaInvoice.findAll({
+      attributes: [
+        "id",
+        "customer_id",
+        "status",
+        "expires_at",
+        "createdAt",
+        "updatedAt",
+        "transport_amount",
+        "transport_payment_status",
+      ],
       include: [
         {
           model: PIItem,
@@ -270,8 +374,9 @@ exports.cancelPI = async (req, res) => {
     });
 
     if (!pi) throw new Error("PI not found");
-    if (pi.status !== "ACTIVE")
-      throw new Error("Only ACTIVE PI can be cancelled");
+    console.log(`Cancelling PI ${pi.id} with status: ${pi.status}`);
+    if (pi.status !== "ACTIVE" && pi.status !== "PENDING_APPROVAL" && pi.status !== "CONFIRMED")
+      throw new Error(`PI can only be cancelled if it is PENDING_APPROVAL, ACTIVE, or CONFIRMED. Current status: ${pi.status}`);
 
     const productIds = pi.items.map(i => i.product_id);
 
@@ -334,16 +439,40 @@ exports.cancelPI = async (req, res) => {
 exports.downloadPI = async (req, res) => {
   try {
     const pi = await ProformaInvoice.findByPk(req.params.id, {
+      attributes: [
+        "id",
+        "customer_id",
+        "status",
+        "createdAt",
+        "transport_amount",
+        "transport_payment_status",
+        "delivery_address",
+        "weight_kg",
+      ],
       include: [
         {
           model: PIItem,
           as: "items",
+          attributes: ["id", "product_id", "qty", "rate", "batch_info"],
           include: [
             {
               model: LeatherProduct,
               as: "product",
-              attributes: ["leather_code", "color"],
+              attributes: ["id", "leather_code", "color", "hsn"],
             },
+          ],
+        },
+        {
+          model: Customer,
+          as: "customer",
+          attributes: [
+            "id",
+            "customer_name",
+            "address",
+            "gst_number",
+            "state",
+            "pin_code",
+            "contact_number",
           ],
         },
       ],
@@ -353,8 +482,26 @@ exports.downloadPI = async (req, res) => {
       return res.status(404).json({ error: "PI not found" });
     }
 
-    return generateExactPIPdf(res, pi);
+    // Flatten customer details to top level for PDF compatibility
+    const piData = pi.toJSON();
+    if (piData.customer) {
+      piData.customer_name = piData.customer.customer_name;
+      piData.address = piData.customer.address;
+      piData.gst_number = piData.customer.gst_number;
+      piData.state = piData.customer.state;
+      piData.pin_code = piData.customer.pin_code;
+      piData.contact = piData.customer.contact_number;
+    }
+
+    console.log("PI Data for PDF:", {
+      customer_name: piData.customer_name,
+      transport_amount: piData.transport_amount,
+      transport_payment_status: piData.transport_payment_status,
+    });
+
+    return generateExactPIPdf(res, piData);
   } catch (err) {
+    console.error("Download PI Error:", err);
     res.status(500).json({ error: err.message });
   }
 };
@@ -381,8 +528,8 @@ exports.revisitPI = async (req, res) => {
     });
 
     if (!pi) throw new Error("PI not found");
-    if (pi.status !== "ACTIVE") {
-      throw new Error("Only ACTIVE PI can be revisited");
+    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status)) {
+      throw new Error("PI can only be revisited if status is ACTIVE, PENDING_APPROVAL, or CONFIRMED");
     }
 
     /**
@@ -486,61 +633,76 @@ exports.revisitPI = async (req, res) => {
       }
 
       /**
-       * 6.2 Consume batch stock (FIFO)
+       * 6.2 Use optimal hide combination algorithm instead of FIFO
        */
       const hideStocks = await LeatherHideStock.findAll({
         where: {
           product_id: item.product_id,
           status: "AVAILABLE",
         },
-        order: [["batch_no", "ASC"]],
+        attributes: ["id", "hide_id", "qty", "batch_no"],
         transaction: t,
         lock: t.LOCK.UPDATE,
       });
 
-      let qtyRemaining = item.qty;
+      if (hideStocks.length === 0) {
+        throw new Error(
+          `No available hides for product ${item.product_id}`
+        );
+      }
+
+      // Use optimal combination algorithm (tolerance 1 sqft)
+      const optimalCombination = findOptimalHidesCombinations(
+        hideStocks.map(s => ({ hide_id: s.hide_id, qty: s.qty })),
+        item.qty,
+        1 // tolerance: 1 sqft
+      );
+
+      if (!optimalCombination || optimalCombination.length === 0) {
+        throw new Error(
+          `Cannot find hide combination for ${item.qty} sqft for product ${item.product_id}`
+        );
+      }
+
+      // Select best match
+      const bestMatch = optimalCombination[0];
+      const usedHideIds = bestMatch.hides.map(h => h.hide_id);
       const usedBatches = [];
 
-      for (const stock of hideStocks) {
-        if (qtyRemaining <= 0) break;
+      // Reserve selected hides
+      for (const hide of bestMatch.hides) {
+        const stock = hideStocks.find(s => s.hide_id === hide.hide_id);
+        if (!stock) {
+          throw new Error(`Hide ${hide.hide_id} not found`);
+        }
 
-        const consumeQty = Math.min(stock.qty, qtyRemaining);
+        const consumeQty = hide.hide_qty;
+        stock.qty -= consumeQty;
+        stock.status = stock.qty <= 0 ? "RESERVED" : "AVAILABLE";
+        await stock.save({ transaction: t });
 
         usedBatches.push({
           hide_id: stock.hide_id,
           batch_no: stock.batch_no,
           qty: consumeQty,
         });
-
-        stock.qty -= consumeQty;
-        stock.status = stock.qty === 0 ? "RESERVED" : "AVAILABLE";
-
-        await stock.save({ transaction: t });
-
-        qtyRemaining -= consumeQty;
-      }
-
-      if (qtyRemaining > 0) {
-        throw new Error(
-          `Insufficient batch stock for product ${item.product_id}`
-        );
       }
 
       /**
        * 6.3 Update aggregate stock
        */
-      leatherStock.available_qty -= item.qty;
-      leatherStock.reserved_qty += item.qty;
+      leatherStock.available_qty -= bestMatch.allocated_qty;
+      leatherStock.reserved_qty += bestMatch.allocated_qty;
       await leatherStock.save({ transaction: t });
 
       /**
-       * 6.4 Recreate PI item (RATE PRESERVED)
+       * 6.4 Recreate PI item (RATE PRESERVED, OPTIMAL HIDES SELECTED)
        */
       await PIItem.create(
         {
           pi_id: pi.id,
           product_id: item.product_id,
-          qty: item.qty,
+          qty: bestMatch.allocated_qty,
           rate,
           batch_info: usedBatches,
         },
@@ -566,6 +728,7 @@ exports.revisitPI = async (req, res) => {
 
 /**
  * Suggest batches for requested product quantity (HIDE-LEVEL)
+ * Uses optimal hide combination selection algorithm
  */
 exports.suggestBatch = async (req, res) => {
   const t = await sequelize.transaction({
@@ -573,45 +736,108 @@ exports.suggestBatch = async (req, res) => {
   });
 
   try {
-    const { items } = req.body;
+    const { items, tolerance } = req.body;
     if (!Array.isArray(items) || items.length === 0) throw new Error("No items provided");
 
+    // configurable tolerance in sqft (default 1 sqft)
+    const TOLERANCE = typeof tolerance === 'number' && !isNaN(tolerance) ? Math.abs(tolerance) : (tolerance ? Math.abs(Number(tolerance)) : 1);
     const response = [];
 
-    const allocateHidesGreedy = (hideList, requested_qty) => {
-      const validHides = hideList.filter((h) => h.qty > 0);
-      if (validHides.length === 0) return null;
+    /**
+     * Find all possible hide combinations and rank by closest match to requested qty
+     * Returns top suggestions within tolerance, or closest matches if outside tolerance
+     */
+    const findOptimalHidesCombinations = (hideList, requested_qty) => {
+      if (hideList.length === 0) return [];
 
-      const sorted = validHides.slice().sort((a, b) => a.qty - b.qty);
-      let allocation = [];
-      let runningSum = 0;
+      // Normalize hides: ensure numeric qty and stable order (largest first helps greedy fallback)
+      const normalized = hideList
+        .map(h => ({ hide_id: h.hide_id, qty: Number(h.qty) }))
+        .filter(h => h.qty > 0)
+        .sort((a, b) => b.qty - a.qty);
 
-      for (const h of sorted) {
-        if (runningSum + h.qty <= requested_qty) {
-          allocation.push({ hide_id: h.hide_id, hide_qty: h.qty });
-          runningSum += h.qty;
-        }
-      }
+      const combinations = [];
+      const n = normalized.length;
 
-      let closestSum = runningSum;
-      let bestAllocation = [...allocation];
-      for (const h of sorted) {
-        if (!allocation.find((x) => x.hide_id === h.hide_id)) {
-          const newSum = runningSum + h.qty;
-          if (Math.abs(newSum - requested_qty) < Math.abs(closestSum - requested_qty)) {
-            bestAllocation = [...allocation, { hide_id: h.hide_id, hide_qty: h.qty }];
-            closestSum = newSum;
+      // Safety: exhaustive search only for reasonably small n (<=20)
+      const MAX_EXHAUSTIVE = 20;
+
+      if (n <= MAX_EXHAUSTIVE) {
+        for (let mask = 1; mask < (1 << n); mask++) {
+          let total = 0;
+          const selectedHides = [];
+
+          for (let i = 0; i < n; i++) {
+            if (mask & (1 << i)) {
+              selectedHides.push(normalized[i]);
+              total += normalized[i].qty;
+            }
           }
+
+          const difference = total - requested_qty;
+          const absDistance = Math.abs(difference);
+
+          combinations.push({
+            allocated_qty: Number(total.toFixed(2)),
+            difference: Number(difference.toFixed(2)),
+            distance: absDistance,
+            hides: selectedHides.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+            withinTolerance: absDistance <= TOLERANCE,
+          });
+        }
+      } else {
+        // Greedy fallback for large hide sets: try prefix sums and some top-k combinations
+        let running = 0;
+        const sel = [];
+        for (const h of normalized) {
+          if (running >= requested_qty) break;
+          sel.push(h);
+          running += h.qty;
+        }
+        combinations.push({
+          allocated_qty: Number(running.toFixed(2)),
+          difference: Number((running - requested_qty).toFixed(2)),
+          distance: Math.abs(Number((running - requested_qty).toFixed(2))),
+          hides: sel.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+          withinTolerance: Math.abs(running - requested_qty) <= TOLERANCE,
+        });
+
+        // try single largest + neighbours
+        for (let i = 0; i < Math.min(10, n); i++) {
+          let total = normalized[i].qty;
+          const selected = [normalized[i]];
+          for (let j = i + 1; j < Math.min(i + 6, n); j++) {
+            if (total >= requested_qty) break;
+            total += normalized[j].qty;
+            selected.push(normalized[j]);
+          }
+          combinations.push({
+            allocated_qty: Number(total.toFixed(2)),
+            difference: Number((total - requested_qty).toFixed(2)),
+            distance: Math.abs(Number((total - requested_qty).toFixed(2))),
+            hides: selected.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+            withinTolerance: Math.abs(total - requested_qty) <= TOLERANCE,
+          });
         }
       }
 
-      return {
-        allocated_qty: closestSum,
-        difference: Number((closestSum - requested_qty).toFixed(2)),
-        hides: bestAllocation,
-      };
+      // Sort by closest match first (distance). For equal distance prefer larger allocated_qty (less shortfall)
+      combinations.sort((a, b) => {
+        if (a.distance !== b.distance) return a.distance - b.distance;
+        return b.allocated_qty - a.allocated_qty;
+      });
+
+      // Return top 5: prioritize within tolerance, then closest matches
+      const withinTolerance = combinations.filter(c => c.withinTolerance);
+      const outsideTolerance = combinations.filter(c => !c.withinTolerance);
+
+      return [
+        ...withinTolerance.slice(0, 5),
+        ...outsideTolerance.slice(0, Math.max(0, 5 - withinTolerance.length)),
+      ];
     };
 
+    // Use module-level findOptimalHidesCombinations with tolerance
     for (const { product_id, requested_qty } of items) {
       if (!product_id || requested_qty == null)
         throw new Error("product_id and requested_qty are required");
@@ -635,6 +861,7 @@ exports.suggestBatch = async (req, res) => {
         continue;
       }
 
+      // Group hides by batch
       const batchMap = {};
       for (const h of hides) {
         if (!batchMap[h.batch_no]) batchMap[h.batch_no] = [];
@@ -643,28 +870,26 @@ exports.suggestBatch = async (req, res) => {
 
       const batchResults = [];
 
+      // For each batch, find optimal hide combinations
       for (const [batch_no, hideList] of Object.entries(batchMap)) {
-        const allocation = allocateHidesGreedy(hideList, requested_qty);
+        const suggestions = findOptimalHidesCombinations(hideList, requested_qty, TOLERANCE);
 
-        if (!allocation || allocation.hides.length === 0) {
-          // Filter nearby hides only: within ±20% of requested quantity
-          const tolerance = requested_qty * 0.2;
-          const nearbyHides = hideList
-            .filter((h) => Math.abs(h.qty - requested_qty) <= tolerance)
-            .map((h) => ({ hide_id: h.hide_id, hide_qty: h.qty }));
-
+        if (suggestions.length === 0) {
           batchResults.push({
             batch_no,
             allocated_qty: 0,
-            difference: Number((0 - requested_qty).toFixed(2)),
-            hides: nearbyHides,
-            reason:
-              nearbyHides.length > 0
-                ? "Requested quantity not fully available, showing nearby hides"
-                : "Requested quantity not available, no nearby hides found",
+            difference: -requested_qty,
+            hides: [],
+            reason: "No valid hide combinations",
           });
         } else {
-          batchResults.push({ batch_no, ...allocation });
+          // Mark the best one (closest match)
+          suggestions[0].isBestMatch = true;
+          batchResults.push({
+            batch_no,
+            suggestions: suggestions,
+            bestSuggestion: suggestions[0]
+          });
         }
       }
 
@@ -679,38 +904,48 @@ exports.suggestBatch = async (req, res) => {
         continue;
       }
 
-      const exactMatches = batchResults.filter((b) => b.difference === 0);
+      // Check for exact matches (difference = 0)
+      const exactMatches = [];
+      for (const batch of batchResults) {
+        if (batch.bestSuggestion && batch.bestSuggestion.difference === 0) {
+          exactMatches.push(batch);
+        }
+      }
+
       if (exactMatches.length) {
         response.push({
           product_id,
           requested_qty,
           exactMatch: true,
-          suggestions: exactMatches,
+          suggestions: exactMatches.map(b => ({
+            batch_no: b.batch_no,
+            ...b.bestSuggestion
+          })),
         });
         continue;
       }
 
-      const nearMatches = batchResults
-        .filter((b) => Math.abs(b.difference) <= 10)
-        .sort((a, b) => Math.abs(a.difference) - Math.abs(b.difference));
-
-      if (nearMatches.length) {
-        response.push({
-          product_id,
-          requested_qty,
-          exactMatch: false,
-          suggestions: nearMatches,
-        });
-        continue;
+      // Get all suggestions from all batches, ranked by best match
+      const allSuggestions = [];
+      for (const batch of batchResults) {
+        if (batch.suggestions) {
+          batch.suggestions.forEach(s => {
+            allSuggestions.push({
+              batch_no: batch.batch_no,
+              ...s
+            });
+          });
+        }
       }
 
-      // Fallback
+      allSuggestions.sort((a, b) => a.distance - b.distance);
+
       response.push({
         product_id,
         requested_qty,
         exactMatch: false,
-        suggestions: batchResults.sort((a, b) => Math.abs(a.difference) - Math.abs(b.difference)),
-        reason: "No batch matched within ±10. Showing closest available batches or nearby hides.",
+        suggestions: allSuggestions.slice(0, 5),
+        reason: "Multiple combinations available, ranked by closeness to requested quantity"
       });
     }
 
@@ -854,6 +1089,12 @@ exports.adminApprovePI = async (req, res) => {
     } = req.body;
 
     const pi = await ProformaInvoice.findByPk(id, {
+      include: [
+        {
+          model: PIItem,
+          as: "items",
+        },
+      ],
       transaction: t,
       lock: t.LOCK.UPDATE,
     });
@@ -863,24 +1104,37 @@ exports.adminApprovePI = async (req, res) => {
       throw new Error("Only PENDING_APPROVAL PI can be approved");
     }
 
-    // 🔹 Calculate transport amount
+    // 🔹 Calculate transport amount based on number of hides (30 Rs per hide)
     let transportAmount = 0;
+    const PRICE_PER_HIDE = 30; // Rs per hide
 
-    if (transport_type_id && weight_kg) {
-      const transportType = await TransportType.findByPk(
-        transport_type_id,
-        { transaction: t }
-      );
+    if (transport_type_id) {
+      // Count total hides in the PI
+      let totalHides = 0;
+      for (const item of pi.items) {
+        let batchInfo = item.batch_info || [];
+        
+        // Handle case where batch_info is stored as JSON string
+        if (typeof batchInfo === 'string') {
+          try {
+            batchInfo = JSON.parse(batchInfo);
+          } catch (e) {
+            console.warn(`Failed to parse batch_info for item ${item.id}:`, e);
+            batchInfo = [];
+          }
+        }
+        
+        // Count number of hides (each entry in batchInfo is one hide)
+        if (Array.isArray(batchInfo)) {
+          totalHides += batchInfo.length;
+        }
+      }
 
-      if (!transportType) throw new Error("Invalid transport type");
-
-      transportAmount = weight_kg * Number(transportType.base_price);
+      console.log(`Transport calculation: ${totalHides} hides × ${PRICE_PER_HIDE} Rs = ${totalHides * PRICE_PER_HIDE} Rs`);
+      transportAmount = totalHides * PRICE_PER_HIDE;
     }
 
-    const finalTransportAmount =
-      transport_payment_status === "PAID" ? 0 : transportAmount;
-
-    // 🔹 Update PI
+    // 🔹 Update PI - Always save transport_amount, regardless of payment status
     await pi.update(
       {
         transport_type_id,
@@ -889,7 +1143,7 @@ exports.adminApprovePI = async (req, res) => {
         transport_payment_status,
         delivery_address,
         receiver_courier_name,
-        transport_amount: finalTransportAmount,
+        transport_amount: transportAmount,
         status: "CONFIRMED",
       },
       { transaction: t }
