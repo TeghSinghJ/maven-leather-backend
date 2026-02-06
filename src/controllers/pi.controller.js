@@ -133,9 +133,11 @@ exports.createPI = async (req, res) => {
     }
     const finalTransportAmount = transport_payment_status === 'PAID' ? 0 : transportAmount;
 
+    // 🔐 RBAC: Set PI creator and location
     const pi = await ProformaInvoice.create(
       {
         customer_id,
+        created_by: req.user.id,
         delivery_address,
         transport_type_id,
         transport_id,
@@ -221,10 +223,22 @@ exports.createPI = async (req, res) => {
 
 exports.getPIs = async (req, res) => {
   try {
+    // 🔐 RBAC: Build where clause based on user role
+    const where = {};
+    
+    if (req.user.role === "BUSINESS_EXECUTIVE") {
+      // Business Executive: Only sees their own PIs
+      where.created_by = req.user.id;
+    }
+    console.log('getPIs: user=', req.user && { id: req.user.id, role: req.user.role }, 'where=', where);
+    // Admin: No where clause needed - sees all PIs
+    
     const pis = await ProformaInvoice.findAll({
+      where,
       attributes: [
         "id",
         "customer_id",
+        "created_by",
         "status",
         "expires_at",
         "createdAt",
@@ -240,7 +254,7 @@ exports.getPIs = async (req, res) => {
             {
               model: LeatherProduct,
               as: "product",
-              attributes: ["leather_code", "color", "image_url"],
+              attributes: ["id", "leather_code", "color", "hsn_code", "image_url"],
             },
           ],
         },
@@ -257,6 +271,11 @@ exports.getPIs = async (req, res) => {
             "pin_code",
             "status",
           ],
+        },
+        {
+          model: require("../../models").User,
+          as: "creator",
+          attributes: ["id", "name", "email", "location"],
         },
       ],
       order: [["createdAt", "DESC"]],
@@ -292,7 +311,7 @@ exports.getPIById = async (req, res) => {
             {
               model: LeatherProduct,
               as: "product",
-              attributes: ["leather_code", "color", "image_url"],
+              attributes: ["id", "leather_code", "color", "hsn_code", "image_url"],
             },
           ],
         },
@@ -326,6 +345,11 @@ exports.getPIById = async (req, res) => {
 
     if (!pi) {
       return res.status(404).json({ error: "Proforma Invoice not found" });
+    }
+
+    // 🔐 RBAC: Business Executive can only view their own PIs; Admin can view any
+    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) {
+      return res.status(403).json({ error: "Unauthorized: You can only view your own PIs" });
     }
 
     const items = pi.items.map((item) => {
@@ -374,6 +398,12 @@ exports.cancelPI = async (req, res) => {
     });
 
     if (!pi) throw new Error("PI not found");
+    
+    // 🔐 RBAC: Business Executive can only cancel their own PIs; Admin can cancel any
+    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) {
+      throw new Error("Unauthorized: You can only cancel your own PIs");
+    }
+    
     console.log(`Cancelling PI ${pi.id} with status: ${pi.status}`);
     if (pi.status !== "ACTIVE" && pi.status !== "PENDING_APPROVAL" && pi.status !== "CONFIRMED")
       throw new Error(`PI can only be cancelled if it is PENDING_APPROVAL, ACTIVE, or CONFIRMED. Current status: ${pi.status}`);
@@ -458,7 +488,7 @@ exports.downloadPI = async (req, res) => {
             {
               model: LeatherProduct,
               as: "product",
-              attributes: ["id", "leather_code", "color", "hsn"],
+              attributes: ["id", "leather_code", "color", "hsn_code"],
             },
           ],
         },
@@ -485,18 +515,30 @@ exports.downloadPI = async (req, res) => {
     // Flatten customer details to top level for PDF compatibility
     const piData = pi.toJSON();
     if (piData.customer) {
-      piData.customer_name = piData.customer.customer_name;
-      piData.address = piData.customer.address;
-      piData.gst_number = piData.customer.gst_number;
-      piData.state = piData.customer.state;
-      piData.pin_code = piData.customer.pin_code;
-      piData.contact = piData.customer.contact_number;
+      piData.customer_name = piData.customer.customer_name || "";
+      piData.address = piData.customer.address || "";
+      piData.gst_number = piData.customer.gst_number || "-";
+      piData.state = piData.customer.state || "";
+      piData.pin_code = piData.customer.pin_code || "";
+      piData.contact = piData.customer.contact_number || "-";
+    } else {
+      // Fallback if customer is not loaded
+      piData.customer_name = piData.customer_name || "";
+      piData.address = piData.address || "";
+      piData.gst_number = piData.gst_number || "-";
+      piData.state = piData.state || "";
+      piData.pin_code = piData.pin_code || "";
+      piData.contact = piData.contact || "-";
     }
 
     console.log("PI Data for PDF:", {
+      pi_id: piData.id,
       customer_name: piData.customer_name,
+      state: piData.state,
+      pin_code: piData.pin_code,
       transport_amount: piData.transport_amount,
       transport_payment_status: piData.transport_payment_status,
+      items_count: piData.items?.length,
     });
 
     return generateExactPIPdf(res, piData);
@@ -505,6 +547,142 @@ exports.downloadPI = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+/**
+ * Suggest revised hide allocations without committing changes
+ * Returns allocation details (allocated_qty, difference, hides) per item for user preview
+ */
+exports.suggestRevisit = async (req, res) => {
+  const t = await sequelize.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  });
+
+  try {
+    const { id } = req.params;
+    const { items } = req.body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new Error("No items provided");
+    }
+
+    const pi = await ProformaInvoice.findByPk(id, {
+      include: [{ model: PIItem, as: "items" }],
+      transaction: t,
+      lock: t.LOCK.SHARE,
+    });
+
+    if (!pi) throw new Error("PI not found");
+    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status)) {
+      throw new Error("PI can only be revisited if status is ACTIVE, PENDING_APPROVAL, or CONFIRMED");
+    }
+
+    // 🔐 RBAC: Business Executive can only request suggestions for their own PIs
+    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) {
+      throw new Error("Unauthorized: You can only suggest revisions for your own PIs");
+    }
+
+    // Cache old rates for reference
+    const rateMap = {};
+    pi.items.forEach((i) => {
+      rateMap[i.product_id] = i.rate;
+    });
+
+    const suggestions = [];
+
+    /**
+     * For each requested item, suggest optimal allocation
+     */
+    for (const item of items) {
+      if (!item.product_id || !item.qty || item.qty <= 0) {
+        throw new Error("Invalid item payload: product_id and qty required");
+      }
+
+      const requestedQty = Number(item.qty);
+      const rate = rateMap[item.product_id];
+
+      if (rate === undefined || rate === null) {
+        throw new Error(`Rate not found for product ${item.product_id}`);
+      }
+
+      // Fetch available hides for this product (do not lock, just read)
+      const hideStocks = await LeatherHideStock.findAll({
+        where: {
+          product_id: item.product_id,
+          status: "AVAILABLE",
+        },
+        attributes: ["id", "hide_id", "qty", "batch_no"],
+        transaction: t,
+        lock: t.LOCK.SHARE,
+      });
+
+      if (hideStocks.length === 0) {
+        suggestions.push({
+          product_id: item.product_id,
+          requested_qty: requestedQty,
+          allocated_qty: 0,
+          difference: -requestedQty,
+          difference_abs: Math.abs(requestedQty),
+          hides: [],
+          rate,
+          reason: "No available hides",
+        });
+        continue;
+      }
+
+      // Use optimal combination algorithm
+      const optimalCombinations = findOptimalHidesCombinations(
+        hideStocks.map(s => ({ hide_id: s.hide_id, qty: s.qty })),
+        requestedQty,
+        1 // tolerance: 1 sqft
+      );
+
+      if (!optimalCombinations || optimalCombinations.length === 0) {
+        suggestions.push({
+          product_id: item.product_id,
+          requested_qty: requestedQty,
+          allocated_qty: 0,
+          difference: -requestedQty,
+          difference_abs: Math.abs(requestedQty),
+          hides: [],
+          rate,
+          reason: "Cannot find optimal hide combination",
+        });
+        continue;
+      }
+
+      const bestMatch = optimalCombinations[0];
+      const difference = bestMatch.allocated_qty - requestedQty;
+
+      suggestions.push({
+        product_id: item.product_id,
+        leather_code: item.leather_code,
+        requested_qty: requestedQty,
+        allocated_qty: bestMatch.allocated_qty,
+        difference: Number(difference.toFixed(2)),
+        difference_abs: Math.abs(bestMatch.allocated_qty - requestedQty),
+        within_tolerance: bestMatch.withinTolerance,
+        hides: bestMatch.hides.map(h => ({
+          hide_id: h.hide_id,
+          hide_qty: h.hide_qty,
+        })),
+        rate,
+        line_amount: Number((bestMatch.allocated_qty * rate).toFixed(2)),
+      });
+    }
+
+    await t.rollback(); // Rollback to avoid any side effects
+
+    res.json({
+      suggestions,
+      message: "Allocation suggestions computed successfully",
+    });
+  } catch (err) {
+    await t.rollback();
+    console.error("Suggest Revisit Error:", err);
+    res.status(400).json({ error: err.message });
+  }
+};
+
 exports.revisitPI = async (req, res) => {
   const t = await sequelize.transaction({
     isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
@@ -530,6 +708,11 @@ exports.revisitPI = async (req, res) => {
     if (!pi) throw new Error("PI not found");
     if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status)) {
       throw new Error("PI can only be revisited if status is ACTIVE, PENDING_APPROVAL, or CONFIRMED");
+    }
+
+    // 🔐 RBAC: Business Executive can only perform revisit on their own PIs
+    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) {
+      throw new Error("Unauthorized: You can only revise your own PIs");
     }
 
     /**
@@ -971,9 +1154,11 @@ exports.createPIConfirmed = async (req, res) => {
     if (!Array.isArray(items) || items.length === 0) throw new Error("No items provided");
 
     // 1️⃣ Create PI
+    // 🔐 RBAC: Set PI creator
     const pi = await ProformaInvoice.create(
       {
         customer_id,
+        created_by: req.user.id,
         status: "PENDING_APPROVAL",
         expires_at: new Date(Date.now() + 7 * 86400000),
       },
@@ -1104,34 +1289,42 @@ exports.adminApprovePI = async (req, res) => {
       throw new Error("Only PENDING_APPROVAL PI can be approved");
     }
 
-    // 🔹 Calculate transport amount based on number of hides (30 Rs per hide)
+    // 🔹 Determine transport amount
+    // Accept `transport_amount` from client (manual mode). If not provided, calculate automatically:
+    // - Prefer transport type's `base_price` (Rs per kg) if available and `weight_kg` provided
+    // - Fallback to default conversion 1 hide = 4.45 kg and PRICE_PER_KG = 30
     let transportAmount = 0;
-    const PRICE_PER_HIDE = 30; // Rs per hide
+    const KG_PER_HIDE = 4.45; // kg per hide (fallback)
+    const PRICE_PER_KG = 30; // Rs per kg (fallback)
 
-    if (transport_type_id) {
-      // Count total hides in the PI
-      let totalHides = 0;
-      for (const item of pi.items) {
-        let batchInfo = item.batch_info || [];
-        
-        // Handle case where batch_info is stored as JSON string
-        if (typeof batchInfo === 'string') {
-          try {
-            batchInfo = JSON.parse(batchInfo);
-          } catch (e) {
-            console.warn(`Failed to parse batch_info for item ${item.id}:`, e);
-            batchInfo = [];
+    if (req.body.transport_amount != null && req.body.transport_amount !== "") {
+      transportAmount = Number(req.body.transport_amount) || 0;
+      console.log(`Using manual transport_amount from request: ${transportAmount}`);
+    } else if (transport_type_id && weight_kg) {
+      // Try to use transport type's base price
+      const transportType = await TransportType.findByPk(transport_type_id, { transaction: t });
+      if (transportType && transportType.base_price) {
+        transportAmount = Number(weight_kg) * Number(transportType.base_price);
+        console.log(`Auto transport: weight_kg ${weight_kg} × transportType.base_price ${transportType.base_price} = ${transportAmount}`);
+      } else {
+        // Fallback: if weight_kg provided use default PRICE_PER_KG, else compute from hides
+        if (weight_kg) {
+          transportAmount = Number(weight_kg) * PRICE_PER_KG;
+          console.log(`Auto transport fallback using weight_kg ${weight_kg} × ${PRICE_PER_KG} = ${transportAmount}`);
+        } else {
+          // Count total hides and convert to kg
+          let totalHides = 0;
+          for (const item of pi.items) {
+            let batchInfo = item.batch_info || [];
+            if (typeof batchInfo === 'string') {
+              try { batchInfo = JSON.parse(batchInfo); } catch (e) { batchInfo = []; }
+            }
+            if (Array.isArray(batchInfo)) totalHides += batchInfo.length;
           }
-        }
-        
-        // Count number of hides (each entry in batchInfo is one hide)
-        if (Array.isArray(batchInfo)) {
-          totalHides += batchInfo.length;
+          transportAmount = totalHides * KG_PER_HIDE * PRICE_PER_KG;
+          console.log(`Auto transport fallback from hides: ${totalHides} hides × ${KG_PER_HIDE} kg/hide × ${PRICE_PER_KG} Rs/kg = ${transportAmount}`);
         }
       }
-
-      console.log(`Transport calculation: ${totalHides} hides × ${PRICE_PER_HIDE} Rs = ${totalHides * PRICE_PER_HIDE} Rs`);
-      transportAmount = totalHides * PRICE_PER_HIDE;
     }
 
     // 🔹 Update PI - Always save transport_amount, regardless of payment status
@@ -1173,7 +1366,7 @@ exports.getPendingApprovalPIs = async (req, res) => {
             {
               model: LeatherProduct,
               as: "product",
-              attributes: ["leather_code", "color", "image_url"],
+              attributes: ["id", "leather_code", "color", "hsn_code", "image_url"],
             },
           ],
         },

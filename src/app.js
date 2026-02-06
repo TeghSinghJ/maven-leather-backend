@@ -5,7 +5,26 @@ const productRoutes = require("./routes/product.routes");
 const piRoutes = require("./routes/pi.routes");
 const app = express();
 
-app.use(cors());
+// Configure CORS based on environment
+const corsOptions = {
+  origin: (origin, callback) => {
+    const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:19006').split(',');
+    
+    // Allow requests with no origin (like mobile apps)
+    if (!origin || allowedOrigins.some(allowed => allowed.trim() === origin)) {
+      callback(null, true);
+    } else {
+      console.warn(`CORS blocked request from origin: ${origin}`);
+      callback(new Error('Not allowed by CORS policy'));
+    }
+  },
+  credentials: true,
+  optionsSuccessStatus: 200,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -22,6 +41,7 @@ app.use("/api/transports", require("./routes/transport.routes"));
 app.use("/api/customers", require("./routes/customer.routes"));
 app.use("/api/auth", require("./routes/auth.routes"));
 app.use("/api/users", require("./routes/users.routes"));
+app.use("/api/batches", require("./routes/batch.routes"));
 
 app.get("/health", (req, res) => {
   res.json({ status: "OK" });

@@ -226,7 +226,7 @@ module.exports = function generateExactPIPdf(res, pi) {
         );
       doc
         .font("Helvetica")
-        .text(item.product.hsn || "4107", leftCol + 212, currentY + 5);
+        .text(item.product.hsn_code || "4107", leftCol + 212, currentY + 5);
       doc.text(qty.toFixed(2), leftCol + 272, currentY + 5, {
         width: 60,
         align: "right",
@@ -248,19 +248,25 @@ module.exports = function generateExactPIPdf(res, pi) {
     });
 
     const sameState =
-      pi.state?.trim().toLowerCase() ===
-      PI_CONST.COMPANY.state.trim().toLowerCase();
+      pi.state && PI_CONST.COMPANY.state &&
+      pi.state.trim().toLowerCase() === PI_CONST.COMPANY.state.trim().toLowerCase();
 
     const cgst = sameState ? (subtotal * PI_CONST.CGST) / 100 : 0;
     const sgst = sameState ? (subtotal * PI_CONST.SGST) / 100 : 0;
     const igst = sameState ? 0 : (subtotal * PI_CONST.IGST) / 100;
     let grandTotal = subtotal + cgst + sgst + igst;
     let transportCharge = 0;
-    if (pi.transport_payment_status === "TO_BE_PAID" && pi.transport_amount) {
-      transportCharge = pi.transport_amount;
-      grandTotal += transportCharge;
-    } else if (pi.transport_amount && pi.transport_amount > 0) {
-      // Show transport charge even if PAID status
+    
+    console.log("PDF Transport Debug:", {
+      transport_amount: pi.transport_amount,
+      transport_payment_status: pi.transport_payment_status,
+      type: typeof pi.transport_amount,
+      pi_state: pi.state,
+      company_state: PI_CONST.COMPANY.state,
+    });
+    
+    // Add transport charge to grand total if present
+    if (pi.transport_amount && pi.transport_amount > 0) {
       transportCharge = pi.transport_amount;
       grandTotal += transportCharge;
     }
@@ -288,23 +294,14 @@ module.exports = function generateExactPIPdf(res, pi) {
       currentY += 12;
     }
 
-    currentY = tableTop + 300;
-    doc.moveTo(40, currentY).lineTo(555, currentY).stroke();
-    
-    // Log for debugging
-    console.log("PDF Transport Debug:", {
-      transport_amount: pi.transport_amount,
-      transport_payment_status: pi.transport_payment_status,
-      type: typeof pi.transport_amount,
-    });
-    
-    if (pi.transport_amount && pi.transport_amount > 0) {
+    // Display transport charges BEFORE total
+    if (transportCharge > 0) {
       doc
         .font("Helvetica")
         .fontSize(8)
         .text("Transport Charges", leftCol + 32, currentY + 5);
 
-      doc.text(pi.transport_amount.toFixed(2), leftCol + 472, currentY + 5, {
+      doc.text(transportCharge.toFixed(2), leftCol + 472, currentY + 5, {
         width: 43,
         align: "right",
       });
@@ -316,7 +313,8 @@ module.exports = function generateExactPIPdf(res, pi) {
       doc
         .font("Helvetica-Bold")
         .fillColor("green")
-        .text("TRANSPORT PAID", leftCol + 350, tableTop + 10, { rotate: 0 });
+        .fontSize(8)
+        .text("TRANSPORT PAID", leftCol + 350, currentY - 12);
       doc.fillColor("black"); // reset color
     }
 
