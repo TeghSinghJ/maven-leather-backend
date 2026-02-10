@@ -7,8 +7,8 @@ module.exports = {
       parent_id: { type: Sequelize.INTEGER, allowNull: true, references: { model: 'transport_types', key: 'id' }, onUpdate: 'CASCADE', onDelete: 'SET NULL' },
       base_price: { type: Sequelize.FLOAT, allowNull: false, defaultValue: 0 },
       status: { type: Sequelize.ENUM('ACTIVE','INACTIVE'), defaultValue: 'ACTIVE' },
-      createdAt: { allowNull: false, type: Sequelize.DATE, defaultValue: Sequelize.fn('NOW') },
-      updatedAt: { allowNull: false, type: Sequelize.DATE, defaultValue: Sequelize.fn('NOW') }
+      createdAt: { allowNull: false, type: Sequelize.DATE, defaultValue: Sequelize.NOW },
+      updatedAt: { allowNull: false, type: Sequelize.DATE, defaultValue: Sequelize.NOW }
     });
   },
   async down(queryInterface, Sequelize) {

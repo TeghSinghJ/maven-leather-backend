@@ -15,7 +15,7 @@ module.exports = {
       },
 
       price_type: {
-        type: Sequelize.ENUM("DP", "PRP", "ARCH"),
+        type: Sequelize.ENUM("DP", "RRP", "ARCH"),
         allowNull: false,
       },
 

@@ -7,7 +7,8 @@ module.exports = {
     stateCode: "560027",
   },
   DEFAULT_RATE: 250, 
-  CGST: 9,
-  SGST: 9,
-  IGST: 18,
+  // GST rates: local (intra-state) split into CGST+SGST, inter-state uses IGST
+  CGST: 2.5,
+  SGST: 2.5,
+  IGST: 5,
 };

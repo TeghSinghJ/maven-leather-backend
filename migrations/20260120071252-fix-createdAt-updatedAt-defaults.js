@@ -1,29 +1,31 @@
-"use strict";
+'use strict';
 
 module.exports = {
   async up(queryInterface, Sequelize) {
-    await queryInterface.changeColumn("leather_products", "createdAt", {
+    await queryInterface.changeColumn('leather_products', 'createdAt', {
       type: Sequelize.DATE,
       allowNull: false,
-      defaultValue: Sequelize.literal("CURRENT_TIMESTAMP"),
+      defaultValue: Sequelize.NOW
     });
 
-    await queryInterface.changeColumn("leather_products", "updatedAt", {
+    await queryInterface.changeColumn('leather_products', 'updatedAt', {
       type: Sequelize.DATE,
       allowNull: false,
-      defaultValue: Sequelize.literal("CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"),
+      defaultValue: Sequelize.NOW
     });
   },
 
   async down(queryInterface, Sequelize) {
-    await queryInterface.changeColumn("leather_products", "createdAt", {
+    await queryInterface.changeColumn('leather_products', 'createdAt', {
       type: Sequelize.DATE,
       allowNull: false,
+      defaultValue: null
     });
 
-    await queryInterface.changeColumn("leather_products", "updatedAt", {
+    await queryInterface.changeColumn('leather_products', 'updatedAt', {
       type: Sequelize.DATE,
       allowNull: false,
+      defaultValue: null
     });
-  },
+  }
 };

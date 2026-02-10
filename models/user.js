@@ -12,6 +12,12 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.ENUM("ADMIN", "BUSINESS_EXECUTIVE"),
         defaultValue: "BUSINESS_EXECUTIVE",
       },
+      location: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        defaultValue: "DEFAULT",
+        comment: "Location/Branch of the user (e.g., Bangalore, Delhi)",
+      },
       is_active: {
         type: DataTypes.BOOLEAN,
         defaultValue: true,

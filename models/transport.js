@@ -1,23 +1,20 @@
 'use strict';
+
+const { table } = require("pdfkit");
+
 module.exports = (sequelize, DataTypes) => {
-  const TransportType = sequelize.define('TransportType', {
+  const Transport = sequelize.define('Transport', {
     name: { type: DataTypes.STRING, allowNull: false },
-    parent_id: { type: DataTypes.INTEGER, allowNull: true },
-    base_price: { type: DataTypes.FLOAT, allowNull: false, defaultValue: 0 },
+    transport_type_id: { type: DataTypes.INTEGER, allowNull: false },
     status: { type: DataTypes.ENUM('ACTIVE','INACTIVE'), defaultValue: 'ACTIVE' }
-  }, { tableName: 'transport_types' });
+  }, { tableName: 'transports' });
 
-  TransportType.associate = (models) => {
-    TransportType.hasMany(models.TransportType, {
-      foreignKey: 'parent_id',
-      as: 'subTypes'
-    });
-
-    TransportType.hasMany(models.Transport, {
+  Transport.associate = (models) => {
+    Transport.belongsTo(models.TransportType, {
       foreignKey: 'transport_type_id',
-      as: 'transports'
+      as: 'type'
     });
   };
 
-  return TransportType;
+  return Transport;
 };

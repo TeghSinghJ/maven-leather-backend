@@ -5,26 +5,26 @@ const productRoutes = require("./routes/product.routes");
 const piRoutes = require("./routes/pi.routes");
 const app = express();
 
-// Configure CORS based on environment
-const corsOptions = {
-  origin: (origin, callback) => {
-    const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:19006').split(',');
+// // Configure CORS based on environment
+// const corsOptions = {
+//   origin: (origin, callback) => {
+//     const allowedOrigins = (process.env.ALLOWED_ORIGINS || 'http://localhost:8081,http://localhost:19006').split(',');
     
-    // Allow requests with no origin (like mobile apps)
-    if (!origin || allowedOrigins.some(allowed => allowed.trim() === origin)) {
-      callback(null, true);
-    } else {
-      console.warn(`CORS blocked request from origin: ${origin}`);
-      callback(new Error('Not allowed by CORS policy'));
-    }
-  },
-  credentials: true,
-  optionsSuccessStatus: 200,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-};
+//     // Allow requests with no origin (like mobile apps)
+//     if (!origin || allowedOrigins.some(allowed => allowed.trim() === origin)) {
+//       callback(null, true);
+//     } else {
+//       console.warn(`CORS blocked request from origin: ${origin}`);
+//       callback(new Error('Not allowed by CORS policy'));
+//     }
+//   },
+//   credentials: true,
+//   optionsSuccessStatus: 200,
+//   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+//   allowedHeaders: ['Content-Type', 'Authorization']
+// };
 
-app.use(cors(corsOptions));
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

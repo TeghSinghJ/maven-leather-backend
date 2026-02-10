@@ -339,43 +339,42 @@ exports.getPIById = async (req, res) => {
           model: Transport,
           as: "transport",
           attributes: ["id", "name"],
+          required: false,
         },
       ],
     });
 
-    if (!pi) {
-      return res.status(404).json({ error: "Proforma Invoice not found" });
-    }
+    if (!pi) return res.status(404).json({ error: "Proforma Invoice not found" });
 
-    // 🔐 RBAC: Business Executive can only view their own PIs; Admin can view any
+    // RBAC check
     if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) {
       return res.status(403).json({ error: "Unauthorized: You can only view your own PIs" });
     }
 
-    const items = pi.items.map((item) => {
-      const batchMap = {};
+    const items = pi.items.map(item => {
+      // Ensure batch_info is always an array
+      let batchInfo = [];
+      if (Array.isArray(item.batch_info)) batchInfo = item.batch_info;
+      else if (typeof item.batch_info === "string") {
+        try { batchInfo = JSON.parse(item.batch_info); } 
+        catch { batchInfo = []; }
+      }
 
-      (item.batch_info || []).forEach((b) => {
-        if (!batchMap[b.batch_no]) {
-          batchMap[b.batch_no] = {
-            batch_no: b.batch_no,
-            qty: 0,
-          };
-        }
-        batchMap[b.batch_no].qty += b.qty;
-      });
+      // Create batch summary
+      const batch_summary = batchInfo.reduce((acc, b) => {
+        if (!acc[b.batch_no]) acc[b.batch_no] = { batch_no: b.batch_no, qty: 0 };
+        acc[b.batch_no].qty += b.qty;
+        return acc;
+      }, {});
 
       return {
         ...item.toJSON(),
-        batch_summary: Object.values(batchMap),
-        batch_info: item.batch_info, // 🔒 keep hide-level truth
+        batch_info: batchInfo,
+        batch_summary: Object.values(batch_summary),
       };
     });
 
-    res.json({
-      ...pi.toJSON(),
-      items,
-    });
+    res.json({ ...pi.toJSON(), items });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1352,6 +1351,7 @@ exports.adminApprovePI = async (req, res) => {
     res.status(400).json({ error: err.message });
   }
 };
+
 exports.getPendingApprovalPIs = async (req, res) => {
   try {
     const pis = await ProformaInvoice.findAll({

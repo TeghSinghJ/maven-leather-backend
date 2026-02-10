@@ -5,6 +5,10 @@ module.exports = (sequelize, DataTypes) => {
       collection_series_id: DataTypes.INTEGER,
       leather_code: DataTypes.STRING,
       color: DataTypes.STRING,
+      hsn_code: {
+        type: DataTypes.STRING,
+        defaultValue: '4107',
+      },
       description: DataTypes.TEXT,
       image_url: DataTypes.STRING,
       status: DataTypes.ENUM("ACTIVE", "INACTIVE"),

@@ -22,6 +22,12 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: "transport_id",
         as: "transport",
       });
+
+      // 🔐 RBAC Association: Track PI creator
+      ProformaInvoice.belongsTo(models.User, {
+        foreignKey: "created_by",
+        as: "creator",
+      });
     }
   }
 
@@ -30,6 +36,12 @@ module.exports = (sequelize, DataTypes) => {
       customer_id: {
         type: DataTypes.INTEGER,
         allowNull: false,
+      },
+
+      created_by: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: "User ID who created this PI (Business Executive or Admin)",
       },
 
       status: {
