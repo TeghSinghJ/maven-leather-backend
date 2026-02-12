@@ -1,8 +1,8 @@
 const { Op } = require("sequelize");
 const { LeatherHideStock } = require("../../models");
 const { recalculateLeatherStock } = require("../services/leatherStock.service");
-const ExcelJS = require("exceljs");
 const multer = require("multer");
+const XLSX = require("xlsx");
 
 const upload = multer({ storage: multer.memoryStorage() });
 
