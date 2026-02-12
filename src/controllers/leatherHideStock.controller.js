@@ -5,21 +5,28 @@ const ExcelJS = require("exceljs");
 const multer = require("multer");
 
 const upload = multer({ storage: multer.memoryStorage() });
-
 exports.bulkUploadHidesExcel = async (req, res) => {
   try {
-    const { product_id } = req.body;
-    if (!req.file) return res.status(400).json({ message: "No file uploaded" });
+    const product_id = req.body?.product_id;
+
+    if (!product_id)
+      return res.status(400).json({ message: "product_id is required" });
+
+    if (!req.file)
+      return res.status(400).json({ message: "No file uploaded" });
 
     const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     const data = XLSX.utils.sheet_to_json(sheet);
 
-    if (!data.length) return res.status(400).json({ message: "Excel is empty" });
+    if (!data.length)
+      return res.status(400).json({ message: "Excel is empty" });
 
     const validData = data.filter(row => row.batch_no && row.qty);
-    if (!validData.length) return res.status(400).json({ message: "No valid rows found" });
+
+    if (!validData.length)
+      return res.status(400).json({ message: "No valid rows found" });
 
     const bulkData = validData.map((row, index) => ({
       product_id,
@@ -32,7 +39,11 @@ exports.bulkUploadHidesExcel = async (req, res) => {
 
     await recalculateLeatherStock(product_id);
 
-    res.status(201).json({ message: "Hides imported", count: createdHides.length });
+    res.status(201).json({
+      message: "Hides imported",
+      count: createdHides.length,
+    });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: err.message });
