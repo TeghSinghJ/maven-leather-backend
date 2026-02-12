@@ -5,9 +5,10 @@ const ExcelJS = require("exceljs");
 const multer = require("multer");
 
 const upload = multer({ storage: multer.memoryStorage() });
+
 exports.bulkUploadHidesExcel = async (req, res) => {
   try {
-    const product_id = req.body?.product_id;
+    const { product_id } = req.body;
 
     if (!product_id)
       return res.status(400).json({ message: "product_id is required" });
@@ -15,7 +16,10 @@ exports.bulkUploadHidesExcel = async (req, res) => {
     if (!req.file)
       return res.status(400).json({ message: "No file uploaded" });
 
-    const workbook = XLSX.read(req.file.buffer, { type: "buffer" });
+    const workbook = XLSX.readFile(req.file.path || req.file.buffer, {
+      type: req.file.buffer ? "buffer" : "file",
+    });
+
     const sheetName = workbook.SheetNames[0];
     const sheet = workbook.Sheets[sheetName];
     const data = XLSX.utils.sheet_to_json(sheet);
@@ -49,7 +53,6 @@ exports.bulkUploadHidesExcel = async (req, res) => {
     res.status(500).json({ message: err.message });
   }
 };
-
 exports.createHideStock = async (req, res) => {
   try {
     const { product_id, batch_no, qty } = req.body;
