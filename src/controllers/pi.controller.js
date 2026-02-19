@@ -381,86 +381,53 @@ exports.getPIById = async (req, res) => {
 };
 
 exports.cancelPI = async (req, res) => {
-  const t = await sequelize.transaction({
-    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
-  });
-
+  const t = await sequelize.transaction({ isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED });
   try {
     const pi = await ProformaInvoice.findByPk(req.params.id, {
-      include: [{
-        model: PIItem,
-        as: "items",
-        attributes: ["id", "product_id", "qty", "batch_info"],
-      }],
+      include: [{ model: PIItem, as: "items", attributes: ["id", "product_id", "qty", "batch_info"] }],
       transaction: t,
       lock: t.LOCK.UPDATE,
     });
-
     if (!pi) throw new Error("PI not found");
-    
-    // 🔐 RBAC: Business Executive can only cancel their own PIs; Admin can cancel any
-    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) {
-      throw new Error("Unauthorized: You can only cancel your own PIs");
-    }
-    
-    console.log(`Cancelling PI ${pi.id} with status: ${pi.status}`);
-    if (pi.status !== "ACTIVE" && pi.status !== "PENDING_APPROVAL" && pi.status !== "CONFIRMED")
-      throw new Error(`PI can only be cancelled if it is PENDING_APPROVAL, ACTIVE, or CONFIRMED. Current status: ${pi.status}`);
+    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) throw new Error("Unauthorized: You can only cancel your own PIs");
+    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status)) throw new Error(`PI can only be cancelled if it is PENDING_APPROVAL, ACTIVE, or CONFIRMED. Current status: ${pi.status}`);
 
     const productIds = pi.items.map(i => i.product_id);
-
-    const stocks = await LeatherStock.findAll({
-      where: { product_id: { [Op.in]: productIds } },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-
+    const stocks = await LeatherStock.findAll({ where: { product_id: { [Op.in]: productIds } }, transaction: t, lock: t.LOCK.UPDATE });
     const stockMap = {};
     stocks.forEach(s => (stockMap[s.product_id] = s));
-
     for (const item of pi.items) {
       const stock = stockMap[item.product_id];
       if (!stock) continue;
-
       stock.available_qty += item.qty;
       stock.reserved_qty -= item.qty;
       if (stock.reserved_qty < 0) stock.reserved_qty = 0;
-
       await stock.save({ transaction: t });
     }
 
     for (const item of pi.items) {
-      const batches = item.batch_info || [];
+      let batches = [];
+      if (Array.isArray(item.batch_info)) batches = item.batch_info;
+      else if (typeof item.batch_info === "string") {
+        try { batches = JSON.parse(item.batch_info); } catch { batches = []; }
+      }
 
       for (const b of batches) {
-        const hideStock = await LeatherHideStock.findOne({
-          where: { hide_id: b.hide_id }, 
-          transaction: t,
-          lock: t.LOCK.UPDATE,
-        });
-
-        if (!hideStock) {
-          throw new Error(
-            `HideStock not found while cancelling PI (hide_id=${b.hide_id})`
-          );
-        }
-
+        if (!b.hide_id) continue;
+        const hideStock = await LeatherHideStock.findOne({ where: { hide_id: b.hide_id }, transaction: t, lock: t.LOCK.UPDATE });
+        if (!hideStock) throw new Error(`HideStock not found while cancelling PI (hide_id=${b.hide_id})`);
         hideStock.qty += b.qty;
         hideStock.status = "AVAILABLE";
-
         await hideStock.save({ transaction: t });
       }
     }
 
     pi.status = "CANCELLED";
     await pi.save({ transaction: t });
-
     await t.commit();
     res.json({ message: "PI cancelled and stock fully restored" });
-
   } catch (err) {
     await t.rollback();
-    console.error("Cancel PI Error:", err);
     res.status(400).json({ error: err.message });
   }
 };
@@ -683,21 +650,14 @@ exports.suggestRevisit = async (req, res) => {
 };
 
 exports.revisitPI = async (req, res) => {
-  const t = await sequelize.transaction({
-    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
-  });
+  const t = await sequelize.transaction({ isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED });
 
   try {
     const { id } = req.params;
     const { items } = req.body;
 
-    if (!Array.isArray(items) || items.length === 0) {
-      throw new Error("No items provided for revisit");
-    }
+    if (!Array.isArray(items) || items.length === 0) throw new Error("No items provided for revisit");
 
-    /**
-     * STEP 1: Fetch & lock PI
-     */
     const pi = await ProformaInvoice.findByPk(id, {
       include: [{ model: PIItem, as: "items" }],
       transaction: t,
@@ -705,63 +665,35 @@ exports.revisitPI = async (req, res) => {
     });
 
     if (!pi) throw new Error("PI not found");
-    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status)) {
-      throw new Error("PI can only be revisited if status is ACTIVE, PENDING_APPROVAL, or CONFIRMED");
-    }
+    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status)) throw new Error("PI can only be revisited if status is ACTIVE, PENDING_APPROVAL, or CONFIRMED");
+    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) throw new Error("Unauthorized: You can only revise your own PIs");
 
-    // 🔐 RBAC: Business Executive can only perform revisit on their own PIs
-    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) {
-      throw new Error("Unauthorized: You can only revise your own PIs");
-    }
-
-    /**
-     * STEP 2: Cache old rates (CRITICAL)
-     */
     const rateMap = {};
-    pi.items.forEach((i) => {
-      rateMap[i.product_id] = i.rate;
-    });
+    pi.items.forEach(i => { rateMap[i.product_id] = i.rate; });
 
-    /**
-     * STEP 3: Release old reserved aggregate stock
-     */
-    const productIds = pi.items.map((i) => i.product_id);
-
-    const stocks = await LeatherStock.findAll({
-      where: { product_id: { [Op.in]: productIds } },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-
+    const productIds = pi.items.map(i => i.product_id);
+    const stocks = await LeatherStock.findAll({ where: { product_id: { [Op.in]: productIds } }, transaction: t, lock: t.LOCK.UPDATE });
     const stockMap = {};
-    stocks.forEach((s) => (stockMap[s.product_id] = s));
+    stocks.forEach(s => { stockMap[s.product_id] = s; });
 
     for (const oldItem of pi.items) {
       const stock = stockMap[oldItem.product_id];
+      if (stock) {
+        stock.available_qty += oldItem.qty;
+        stock.reserved_qty -= oldItem.qty;
+        if (stock.reserved_qty < 0) stock.reserved_qty = 0;
+        await stock.save({ transaction: t });
+      }
 
-      if (!stock) continue;
-
-      stock.available_qty += oldItem.qty;
-      stock.reserved_qty -= oldItem.qty;
-
-      if (stock.reserved_qty < 0) stock.reserved_qty = 0;
-
-      await stock.save({ transaction: t });
-    }
-
-    /**
-     * STEP 4: Restore batch stock
-     */
-    for (const oldItem of pi.items) {
-      const batches = oldItem.batch_info || [];
+      let batches = [];
+      if (Array.isArray(oldItem.batch_info)) batches = oldItem.batch_info;
+      else if (typeof oldItem.batch_info === "string") {
+        try { batches = JSON.parse(oldItem.batch_info); } catch { batches = []; }
+      }
+      batches = batches.filter(b => b && b.hide_id);
 
       for (const b of batches) {
-        const hideStock = await LeatherHideStock.findOne({
-          where: { hide_id: b.hide_id },
-          transaction: t,
-          lock: t.LOCK.UPDATE,
-        });
-
+        const hideStock = await LeatherHideStock.findOne({ where: { hide_id: b.hide_id }, transaction: t, lock: t.LOCK.UPDATE });
         if (hideStock) {
           hideStock.qty += b.qty;
           hideStock.status = "AVAILABLE";
@@ -770,143 +702,53 @@ exports.revisitPI = async (req, res) => {
       }
     }
 
-    /**
-     * STEP 5: Delete old PI items
-     */
-    await PIItem.destroy({
-      where: { pi_id: pi.id },
-      transaction: t,
-    });
+    await PIItem.destroy({ where: { pi_id: pi.id }, transaction: t });
 
-    /**
-     * STEP 6: Re-reserve stock & recreate PI items
-     */
     for (const item of items) {
-      if (!item.product_id || !item.qty || item.qty <= 0) {
-        throw new Error("Invalid item payload");
-      }
+      if (!item.product_id || !item.qty || item.qty <= 0) throw new Error("Invalid item payload");
 
       const rate = rateMap[item.product_id];
-      if (rate === undefined || rate === null) {
-        throw new Error(
-          `Rate not found for product ${item.product_id}. Cannot revisit PI`
-        );
-      }
+      if (rate === undefined || rate === null) throw new Error(`Rate not found for product ${item.product_id}. Cannot revisit PI`);
 
-      /**
-       * 6.1 Lock LeatherStock
-       */
-      const leatherStock = await LeatherStock.findOne({
-        where: { product_id: item.product_id },
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      });
+      const leatherStock = await LeatherStock.findOne({ where: { product_id: item.product_id }, transaction: t, lock: t.LOCK.UPDATE });
+      if (!leatherStock) throw new Error(`LeatherStock not found for product ${item.product_id}`);
+      if (leatherStock.available_qty < item.qty) throw new Error(`Insufficient available stock for product ${item.product_id}`);
 
-      if (!leatherStock) {
-        throw new Error(
-          `LeatherStock not found for product ${item.product_id}`
-        );
-      }
+      const hideStocks = await LeatherHideStock.findAll({ where: { product_id: item.product_id, status: "AVAILABLE" }, attributes: ["id", "hide_id", "qty", "batch_no"], transaction: t, lock: t.LOCK.UPDATE });
+      if (hideStocks.length === 0) throw new Error(`No available hides for product ${item.product_id}`);
 
-      if (leatherStock.available_qty < item.qty) {
-        throw new Error(
-          `Insufficient available stock for product ${item.product_id}`
-        );
-      }
+      const optimalCombination = findOptimalHidesCombinations(hideStocks.map(s => ({ hide_id: s.hide_id, qty: s.qty })), item.qty, 1);
+      if (!optimalCombination || optimalCombination.length === 0) throw new Error(`Cannot find hide combination for ${item.qty} sqft for product ${item.product_id}`);
 
-      /**
-       * 6.2 Use optimal hide combination algorithm instead of FIFO
-       */
-      const hideStocks = await LeatherHideStock.findAll({
-        where: {
-          product_id: item.product_id,
-          status: "AVAILABLE",
-        },
-        attributes: ["id", "hide_id", "qty", "batch_no"],
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      });
-
-      if (hideStocks.length === 0) {
-        throw new Error(
-          `No available hides for product ${item.product_id}`
-        );
-      }
-
-      // Use optimal combination algorithm (tolerance 1 sqft)
-      const optimalCombination = findOptimalHidesCombinations(
-        hideStocks.map(s => ({ hide_id: s.hide_id, qty: s.qty })),
-        item.qty,
-        1 // tolerance: 1 sqft
-      );
-
-      if (!optimalCombination || optimalCombination.length === 0) {
-        throw new Error(
-          `Cannot find hide combination for ${item.qty} sqft for product ${item.product_id}`
-        );
-      }
-
-      // Select best match
       const bestMatch = optimalCombination[0];
-      const usedHideIds = bestMatch.hides.map(h => h.hide_id);
       const usedBatches = [];
 
-      // Reserve selected hides
       for (const hide of bestMatch.hides) {
         const stock = hideStocks.find(s => s.hide_id === hide.hide_id);
-        if (!stock) {
-          throw new Error(`Hide ${hide.hide_id} not found`);
-        }
-
-        const consumeQty = hide.hide_qty;
-        stock.qty -= consumeQty;
+        if (!stock) throw new Error(`Hide ${hide.hide_id} not found`);
+        stock.qty -= hide.hide_qty;
         stock.status = stock.qty <= 0 ? "RESERVED" : "AVAILABLE";
         await stock.save({ transaction: t });
-
-        usedBatches.push({
-          hide_id: stock.hide_id,
-          batch_no: stock.batch_no,
-          qty: consumeQty,
-        });
+        usedBatches.push({ hide_id: stock.hide_id, batch_no: stock.batch_no, qty: hide.hide_qty });
       }
 
-      /**
-       * 6.3 Update aggregate stock
-       */
       leatherStock.available_qty -= bestMatch.allocated_qty;
       leatherStock.reserved_qty += bestMatch.allocated_qty;
       await leatherStock.save({ transaction: t });
 
-      /**
-       * 6.4 Recreate PI item (RATE PRESERVED, OPTIMAL HIDES SELECTED)
-       */
-      await PIItem.create(
-        {
-          pi_id: pi.id,
-          product_id: item.product_id,
-          qty: bestMatch.allocated_qty,
-          rate,
-          batch_info: usedBatches,
-        },
-        { transaction: t }
-      );
+      await PIItem.create({ pi_id: pi.id, product_id: item.product_id, qty: bestMatch.allocated_qty, rate, batch_info: usedBatches }, { transaction: t });
     }
 
-    /**
-     * STEP 7: Update PI timestamp
-     */
     pi.updatedAt = new Date();
     await pi.save({ transaction: t });
-
     await t.commit();
-
     res.json({ message: "PI revisited successfully" });
   } catch (err) {
     await t.rollback();
-    console.error("Revisit PI Error:", err);
     res.status(400).json({ error: err.message });
   }
 };
+
 
 /**
  * Suggest batches for requested product quantity (HIDE-LEVEL)
