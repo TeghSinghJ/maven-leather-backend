@@ -230,6 +230,29 @@ exports.getPIs = async (req, res) => {
       // Business Executive: Only sees their own PIs
       where.created_by = req.user.id;
     }
+
+    // Date filter
+    const { dateFilter } = req.query;
+    console.log('Date filter received:', dateFilter);
+    if (dateFilter && dateFilter !== 'all') {
+      const now = new Date();
+      if (dateFilter === 'today') {
+        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        where.createdAt = { [Op.gte]: start };
+        console.log('Filtering for today:', start);
+      } else if (dateFilter === 'week') {
+        const start = new Date(now);
+        start.setDate(now.getDate() - 7);
+        where.createdAt = { [Op.gte]: start };
+        console.log('Filtering for week:', start);
+      } else if (dateFilter === 'month') {
+        const start = new Date(now);
+        start.setDate(now.getDate() - 30);
+        where.createdAt = { [Op.gte]: start };
+        console.log('Filtering for month:', start);
+      }
+    }
+
     console.log('getPIs: user=', req.user && { id: req.user.id, role: req.user.role }, 'where=', where);
     // Admin: No where clause needed - sees all PIs
     
@@ -423,6 +446,7 @@ exports.cancelPI = async (req, res) => {
     }
 
     pi.status = "CANCELLED";
+    pi.cancelled_at = new Date();
     await pi.save({ transaction: t });
     await t.commit();
     res.json({ message: "PI cancelled and stock fully restored" });

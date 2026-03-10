@@ -109,3 +109,23 @@ exports.getDashboardCounts = async (req, res) => {
     });
   }
 };
+
+exports.getAllStocks = async (req, res) => {
+  try {
+    const stocks = await LeatherStock.findAll({
+      include: [
+        {
+          model: LeatherProduct,
+          as: "product",
+          attributes: ["leather_code", "color"],
+        },
+      ],
+      attributes: ["id", "available_qty"],
+    });
+
+    res.json(stocks);
+  } catch (error) {
+    console.error("Get all stocks error:", error);
+    res.status(500).json({ error: "Failed to fetch stocks" });
+  }
+};
