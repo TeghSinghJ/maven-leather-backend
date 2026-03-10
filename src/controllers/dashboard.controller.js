@@ -117,13 +117,17 @@ exports.getAllStocks = async (req, res) => {
         {
           model: LeatherProduct,
           as: "product",
-          attributes: ["leather_code", "color"],
+          attributes: ["id", "leather_code", "color"],
         },
       ],
       attributes: ["id", "available_qty"],
+      raw: false,
     });
 
-    res.json(stocks);
+    // Convert to plain JSON to ensure associations are included
+    const formattedStocks = stocks.map((stock) => stock.toJSON());
+
+    res.json(formattedStocks);
   } catch (error) {
     console.error("Get all stocks error:", error);
     res.status(500).json({ error: "Failed to fetch stocks" });

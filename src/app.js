@@ -50,7 +50,7 @@ app.get("/health", (req, res) => {
 
 // Auto-cancel PIs after 7 days
 const cron = require('node-cron');
-const { ProformaInvoice, PIItem, LeatherStock, LeatherHideStock, sequelize } = require('./models');
+const { ProformaInvoice, PIItem, LeatherStock, LeatherHideStock, sequelize } = require('../models');
 const { Op } = require('sequelize');
 
 cron.schedule('0 0 * * *', async () => { // Run daily at midnight
