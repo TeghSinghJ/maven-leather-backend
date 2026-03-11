@@ -10,20 +10,24 @@ const {
   LeatherProduct,
   sequelize,
 } = require("../../models");
-const { Op ,Transaction} = require("sequelize");
-const generateExactPIPdf = require("../utils/piPdf");
-
+const { Op, Transaction } = require("sequelize");
+const { COMPANY, COMPANY_LIST } = require("../constants/company.constants");
+const generateExactPIPdf = require('../utils/piPdf');
 /**
  * Utility: Find optimal hide combinations for a requested quantity
  * Returns combinations sorted by closeness to requested quantity
  */
-const findOptimalHidesCombinations = (hideList, requested_qty, tolerance = 1) => {
+const findOptimalHidesCombinations = (
+  hideList,
+  requested_qty,
+  tolerance = 1,
+) => {
   if (hideList.length === 0) return [];
 
   // Normalize hides: ensure numeric qty and stable order (largest first helps greedy fallback)
   const normalized = hideList
-    .map(h => ({ hide_id: h.hide_id, qty: Number(h.qty) }))
-    .filter(h => h.qty > 0)
+    .map((h) => ({ hide_id: h.hide_id, qty: Number(h.qty) }))
+    .filter((h) => h.qty > 0)
     .sort((a, b) => b.qty - a.qty);
 
   const combinations = [];
@@ -33,7 +37,7 @@ const findOptimalHidesCombinations = (hideList, requested_qty, tolerance = 1) =>
   const MAX_EXHAUSTIVE = 20;
 
   if (n <= MAX_EXHAUSTIVE) {
-    for (let mask = 1; mask < (1 << n); mask++) {
+    for (let mask = 1; mask < 1 << n; mask++) {
       let total = 0;
       const selectedHides = [];
 
@@ -51,7 +55,10 @@ const findOptimalHidesCombinations = (hideList, requested_qty, tolerance = 1) =>
         allocated_qty: Number(total.toFixed(2)),
         difference: Number(difference.toFixed(2)),
         distance: absDistance,
-        hides: selectedHides.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+        hides: selectedHides.map((h) => ({
+          hide_id: h.hide_id,
+          hide_qty: Number(h.qty.toFixed(2)),
+        })),
         withinTolerance: absDistance <= tolerance,
       });
     }
@@ -68,7 +75,10 @@ const findOptimalHidesCombinations = (hideList, requested_qty, tolerance = 1) =>
       allocated_qty: Number(running.toFixed(2)),
       difference: Number((running - requested_qty).toFixed(2)),
       distance: Math.abs(Number((running - requested_qty).toFixed(2))),
-      hides: sel.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+      hides: sel.map((h) => ({
+        hide_id: h.hide_id,
+        hide_qty: Number(h.qty.toFixed(2)),
+      })),
       withinTolerance: Math.abs(running - requested_qty) <= tolerance,
     });
 
@@ -85,7 +95,10 @@ const findOptimalHidesCombinations = (hideList, requested_qty, tolerance = 1) =>
         allocated_qty: Number(total.toFixed(2)),
         difference: Number((total - requested_qty).toFixed(2)),
         distance: Math.abs(Number((total - requested_qty).toFixed(2))),
-        hides: selected.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+        hides: selected.map((h) => ({
+          hide_id: h.hide_id,
+          hide_qty: Number(h.qty.toFixed(2)),
+        })),
         withinTolerance: Math.abs(total - requested_qty) <= tolerance,
       });
     }
@@ -98,8 +111,8 @@ const findOptimalHidesCombinations = (hideList, requested_qty, tolerance = 1) =>
   });
 
   // Return top 5: prioritize within tolerance, then closest matches
-  const withinTolerance = combinations.filter(c => c.withinTolerance);
-  const outsideTolerance = combinations.filter(c => !c.withinTolerance);
+  const withinTolerance = combinations.filter((c) => c.withinTolerance);
+  const outsideTolerance = combinations.filter((c) => !c.withinTolerance);
 
   return [
     ...withinTolerance.slice(0, 5),
@@ -107,7 +120,9 @@ const findOptimalHidesCombinations = (hideList, requested_qty, tolerance = 1) =>
   ];
 };
 exports.createPI = async (req, res) => {
-  const t = await sequelize.transaction({ isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED });
+  const t = await sequelize.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  });
 
   try {
     const {
@@ -122,16 +137,19 @@ exports.createPI = async (req, res) => {
     } = req.body;
 
     if (!Array.isArray(items) || items.length === 0) {
-      throw new Error('No items provided for PI');
+      throw new Error("No items provided for PI");
     }
 
     let transportAmount = 0;
     if (transport_type_id && weight_kg) {
-      const transportType = await TransportType.findByPk(transport_type_id, { transaction: t });
-      if (!transportType) throw new Error('Invalid transport type');
+      const transportType = await TransportType.findByPk(transport_type_id, {
+        transaction: t,
+      });
+      if (!transportType) throw new Error("Invalid transport type");
       transportAmount = weight_kg * Number(transportType.base_price);
     }
-    const finalTransportAmount = transport_payment_status === 'PAID' ? 0 : transportAmount;
+    const finalTransportAmount =
+      transport_payment_status === "PAID" ? 0 : transportAmount;
 
     // 🔐 RBAC: Set PI creator and location
     const pi = await ProformaInvoice.create(
@@ -144,17 +162,19 @@ exports.createPI = async (req, res) => {
         weight_kg,
         transport_payment_status,
         transport_amount: finalTransportAmount,
-        status: 'ACTIVE',
+        status: "ACTIVE",
         expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
-      { transaction: t }
+      { transaction: t },
     );
 
     for (const item of items) {
       const { product_id, qty, batch_no, hides } = item;
 
       if (!product_id || !qty || !Array.isArray(hides) || hides.length === 0) {
-        throw new Error('Invalid item payload: product_id, qty, and hides are required');
+        throw new Error(
+          "Invalid item payload: product_id, qty, and hides are required",
+        );
       }
 
       let allocatedQty = 0;
@@ -164,23 +184,35 @@ exports.createPI = async (req, res) => {
         const { hide_id, hide_qty } = h;
 
         const hideStock = await LeatherHideStock.findOne({
-          where: { hide_id, status: 'AVAILABLE', batch_no },
+          where: { hide_id, status: "AVAILABLE", batch_no },
           transaction: t,
           lock: t.LOCK.UPDATE,
         });
 
-        if (!hideStock) throw new Error(`Hide ${hide_id} in batch ${batch_no} not available`);
-        if (hideStock.qty < hide_qty) throw new Error(`Hide ${hide_id} in batch ${batch_no} has insufficient quantity`);
+        if (!hideStock)
+          throw new Error(`Hide ${hide_id} in batch ${batch_no} not available`);
+        if (hideStock.qty < hide_qty)
+          throw new Error(
+            `Hide ${hide_id} in batch ${batch_no} has insufficient quantity`,
+          );
 
         hideStock.qty -= hide_qty;
-        hideStock.status = hideStock.qty === 0 ? 'RESERVED' : 'AVAILABLE';
+        hideStock.status = hideStock.qty === 0 ? "RESERVED" : "AVAILABLE";
         await hideStock.save({ transaction: t });
 
-        batchInfo.push({ hide_id, batch_no, qty: hide_qty, collection_series_id: hideStock.collection_series_id });
+        batchInfo.push({
+          hide_id,
+          batch_no,
+          qty: hide_qty,
+          collection_series_id: hideStock.collection_series_id,
+        });
         allocatedQty += hide_qty;
       }
 
-      if (allocatedQty !== qty) throw new Error(`Allocated quantity (${allocatedQty}) does not match requested quantity (${qty}) for product ${product_id}`);
+      if (allocatedQty !== qty)
+        throw new Error(
+          `Allocated quantity (${allocatedQty}) does not match requested quantity (${qty}) for product ${product_id}`,
+        );
 
       const leatherStock = await LeatherStock.findOne({
         where: { product_id },
@@ -188,17 +220,21 @@ exports.createPI = async (req, res) => {
         lock: t.LOCK.UPDATE,
       });
 
-      if (!leatherStock || leatherStock.available_qty < qty) throw new Error(`Insufficient overall stock for product ${product_id}`);
+      if (!leatherStock || leatherStock.available_qty < qty)
+        throw new Error(`Insufficient overall stock for product ${product_id}`);
 
       leatherStock.available_qty -= qty;
       leatherStock.reserved_qty += qty;
       await leatherStock.save({ transaction: t });
 
       const priceObj = await CollectionPrice.findOne({
-        where: { collection_series_id: batchInfo[0].collection_series_id, price_type },
+        where: {
+          collection_series_id: batchInfo[0].collection_series_id,
+          price_type,
+        },
         transaction: t,
       });
-      if (!priceObj) throw new Error('Price not defined for product');
+      if (!priceObj) throw new Error("Price not defined for product");
 
       await PIItem.create(
         {
@@ -208,12 +244,12 @@ exports.createPI = async (req, res) => {
           rate: priceObj.price,
           batch_info: batchInfo,
         },
-        { transaction: t }
+        { transaction: t },
       );
     }
 
     await t.commit();
-    res.status(201).json({ message: 'PI created successfully', pi_id: pi.id });
+    res.status(201).json({ message: "PI created successfully", pi_id: pi.id });
   } catch (err) {
     await t.rollback();
     console.error(err);
@@ -225,7 +261,7 @@ exports.getPIs = async (req, res) => {
   try {
     // 🔐 RBAC: Build where clause based on user role
     const where = {};
-    
+
     if (req.user.role === "BUSINESS_EXECUTIVE") {
       // Business Executive: Only sees their own PIs
       where.created_by = req.user.id;
@@ -233,34 +269,36 @@ exports.getPIs = async (req, res) => {
 
     // Date filter
     const { dateFilter } = req.query;
-    console.log('Date filter received:', dateFilter);
-    if (dateFilter && dateFilter !== 'all') {
+    console.log("Date filter received:", dateFilter);
+    if (dateFilter && dateFilter !== "all") {
       const now = new Date();
-      if (dateFilter === 'today') {
-        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      if (dateFilter === "today") {
+        const start = new Date(
+          now.getFullYear(),
+          now.getMonth(),
+          now.getDate(),
+        );
         where.createdAt = { [Op.gte]: start };
-        console.log('Filtering for today:', start);
-      } else if (dateFilter === 'week') {
+        console.log("Filtering for today:", start);
+      } else if (dateFilter === "week") {
         const start = new Date(now);
         start.setDate(now.getDate() - 7);
         where.createdAt = { [Op.gte]: start };
-        console.log('Filtering for week:', start);
-      } else if (dateFilter === 'month') {
+        console.log("Filtering for week:", start);
+      } else if (dateFilter === "month") {
         const start = new Date(now);
         start.setDate(now.getDate() - 30);
         where.createdAt = { [Op.gte]: start };
-        console.log('Filtering for month:', start);
+        console.log("Filtering for month:", start);
       }
     }
 
-    console.log('getPIs: user=', req.user && { id: req.user.id, role: req.user.role }, 'where=', where);
-    // Admin: No where clause needed - sees all PIs
-    
     const pis = await ProformaInvoice.findAll({
       where,
       attributes: [
         "id",
         "customer_id",
+        "company_name",
         "created_by",
         "status",
         "expires_at",
@@ -277,7 +315,13 @@ exports.getPIs = async (req, res) => {
             {
               model: LeatherProduct,
               as: "product",
-              attributes: ["id", "leather_code", "color", "hsn_code", "image_url"],
+              attributes: [
+                "id",
+                "leather_code",
+                "color",
+                "hsn_code",
+                "image_url",
+              ],
             },
           ],
         },
@@ -309,8 +353,8 @@ exports.getPIs = async (req, res) => {
 
       return {
         ...piJson,
-        ...(piJson.customer || {}), 
-        customer: undefined,       
+        ...(piJson.customer || {}),
+        customer: undefined,
       };
     });
 
@@ -334,7 +378,13 @@ exports.getPIById = async (req, res) => {
             {
               model: LeatherProduct,
               as: "product",
-              attributes: ["id", "leather_code", "color", "hsn_code", "image_url"],
+              attributes: [
+                "id",
+                "leather_code",
+                "color",
+                "hsn_code",
+                "image_url",
+              ],
             },
           ],
         },
@@ -367,25 +417,35 @@ exports.getPIById = async (req, res) => {
       ],
     });
 
-    if (!pi) return res.status(404).json({ error: "Proforma Invoice not found" });
+    if (!pi)
+      return res.status(404).json({ error: "Proforma Invoice not found" });
 
     // RBAC check
-    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) {
-      return res.status(403).json({ error: "Unauthorized: You can only view your own PIs" });
+    if (
+      req.user.role === "BUSINESS_EXECUTIVE" &&
+      pi.created_by !== req.user.id
+    ) {
+      return res
+        .status(403)
+        .json({ error: "Unauthorized: You can only view your own PIs" });
     }
 
-    const items = pi.items.map(item => {
+    const items = pi.items.map((item) => {
       // Ensure batch_info is always an array
       let batchInfo = [];
       if (Array.isArray(item.batch_info)) batchInfo = item.batch_info;
       else if (typeof item.batch_info === "string") {
-        try { batchInfo = JSON.parse(item.batch_info); } 
-        catch { batchInfo = []; }
+        try {
+          batchInfo = JSON.parse(item.batch_info);
+        } catch {
+          batchInfo = [];
+        }
       }
 
       // Create batch summary
       const batch_summary = batchInfo.reduce((acc, b) => {
-        if (!acc[b.batch_no]) acc[b.batch_no] = { batch_no: b.batch_no, qty: 0 };
+        if (!acc[b.batch_no])
+          acc[b.batch_no] = { batch_no: b.batch_no, qty: 0 };
         acc[b.batch_no].qty += b.qty;
         return acc;
       }, {});
@@ -404,21 +464,37 @@ exports.getPIById = async (req, res) => {
 };
 
 exports.cancelPI = async (req, res) => {
-  const t = await sequelize.transaction({ isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED });
+  const t = await sequelize.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  });
   try {
     const pi = await ProformaInvoice.findByPk(req.params.id, {
-      include: [{ model: PIItem, as: "items", attributes: ["id", "product_id", "qty", "batch_info"] }],
+      include: [
+        {
+          model: PIItem,
+          as: "items",
+          attributes: ["id", "product_id", "qty", "batch_info"],
+        },
+      ],
       transaction: t,
       lock: t.LOCK.UPDATE,
     });
     if (!pi) throw new Error("PI not found");
-    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) throw new Error("Unauthorized: You can only cancel your own PIs");
-    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status)) throw new Error(`PI can only be cancelled if it is PENDING_APPROVAL, ACTIVE, or CONFIRMED. Current status: ${pi.status}`);
+    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id)
+      throw new Error("Unauthorized: You can only cancel your own PIs");
+    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status))
+      throw new Error(
+        `PI can only be cancelled if it is PENDING_APPROVAL, ACTIVE, or CONFIRMED. Current status: ${pi.status}`,
+      );
 
-    const productIds = pi.items.map(i => i.product_id);
-    const stocks = await LeatherStock.findAll({ where: { product_id: { [Op.in]: productIds } }, transaction: t, lock: t.LOCK.UPDATE });
+    const productIds = pi.items.map((i) => i.product_id);
+    const stocks = await LeatherStock.findAll({
+      where: { product_id: { [Op.in]: productIds } },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
     const stockMap = {};
-    stocks.forEach(s => (stockMap[s.product_id] = s));
+    stocks.forEach((s) => (stockMap[s.product_id] = s));
     for (const item of pi.items) {
       const stock = stockMap[item.product_id];
       if (!stock) continue;
@@ -432,13 +508,24 @@ exports.cancelPI = async (req, res) => {
       let batches = [];
       if (Array.isArray(item.batch_info)) batches = item.batch_info;
       else if (typeof item.batch_info === "string") {
-        try { batches = JSON.parse(item.batch_info); } catch { batches = []; }
+        try {
+          batches = JSON.parse(item.batch_info);
+        } catch {
+          batches = [];
+        }
       }
 
       for (const b of batches) {
         if (!b.hide_id) continue;
-        const hideStock = await LeatherHideStock.findOne({ where: { hide_id: b.hide_id }, transaction: t, lock: t.LOCK.UPDATE });
-        if (!hideStock) throw new Error(`HideStock not found while cancelling PI (hide_id=${b.hide_id})`);
+        const hideStock = await LeatherHideStock.findOne({
+          where: { hide_id: b.hide_id },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+        if (!hideStock)
+          throw new Error(
+            `HideStock not found while cancelling PI (hide_id=${b.hide_id})`,
+          );
         hideStock.qty += b.qty;
         hideStock.status = "AVAILABLE";
         await hideStock.save({ transaction: t });
@@ -502,7 +589,6 @@ exports.downloadPI = async (req, res) => {
       return res.status(404).json({ error: "PI not found" });
     }
 
-    // Flatten customer details to top level for PDF compatibility
     const piData = pi.toJSON();
     if (piData.customer) {
       piData.customer_name = piData.customer.customer_name || "";
@@ -512,7 +598,6 @@ exports.downloadPI = async (req, res) => {
       piData.pin_code = piData.customer.pin_code || "";
       piData.contact = piData.customer.contact_number || "-";
     } else {
-      // Fallback if customer is not loaded
       piData.customer_name = piData.customer_name || "";
       piData.address = piData.address || "";
       piData.gst_number = piData.gst_number || "-";
@@ -520,17 +605,6 @@ exports.downloadPI = async (req, res) => {
       piData.pin_code = piData.pin_code || "";
       piData.contact = piData.contact || "-";
     }
-
-    console.log("PI Data for PDF:", {
-      pi_id: piData.id,
-      customer_name: piData.customer_name,
-      state: piData.state,
-      pin_code: piData.pin_code,
-      transport_amount: piData.transport_amount,
-      transport_payment_status: piData.transport_payment_status,
-      items_count: piData.items?.length,
-    });
-
     return generateExactPIPdf(res, piData);
   } catch (err) {
     console.error("Download PI Error:", err);
@@ -563,12 +637,19 @@ exports.suggestRevisit = async (req, res) => {
 
     if (!pi) throw new Error("PI not found");
     if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status)) {
-      throw new Error("PI can only be revisited if status is ACTIVE, PENDING_APPROVAL, or CONFIRMED");
+      throw new Error(
+        "PI can only be revisited if status is ACTIVE, PENDING_APPROVAL, or CONFIRMED",
+      );
     }
 
     // 🔐 RBAC: Business Executive can only request suggestions for their own PIs
-    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) {
-      throw new Error("Unauthorized: You can only suggest revisions for your own PIs");
+    if (
+      req.user.role === "BUSINESS_EXECUTIVE" &&
+      pi.created_by !== req.user.id
+    ) {
+      throw new Error(
+        "Unauthorized: You can only suggest revisions for your own PIs",
+      );
     }
 
     // Cache old rates for reference
@@ -621,9 +702,9 @@ exports.suggestRevisit = async (req, res) => {
 
       // Use optimal combination algorithm
       const optimalCombinations = findOptimalHidesCombinations(
-        hideStocks.map(s => ({ hide_id: s.hide_id, qty: s.qty })),
+        hideStocks.map((s) => ({ hide_id: s.hide_id, qty: s.qty })),
         requestedQty,
-        1 // tolerance: 1 sqft
+        1, // tolerance: 1 sqft
       );
 
       if (!optimalCombinations || optimalCombinations.length === 0) {
@@ -651,7 +732,7 @@ exports.suggestRevisit = async (req, res) => {
         difference: Number(difference.toFixed(2)),
         difference_abs: Math.abs(bestMatch.allocated_qty - requestedQty),
         within_tolerance: bestMatch.withinTolerance,
-        hides: bestMatch.hides.map(h => ({
+        hides: bestMatch.hides.map((h) => ({
           hide_id: h.hide_id,
           hide_qty: h.hide_qty,
         })),
@@ -674,13 +755,16 @@ exports.suggestRevisit = async (req, res) => {
 };
 
 exports.revisitPI = async (req, res) => {
-  const t = await sequelize.transaction({ isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED });
+  const t = await sequelize.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  });
 
   try {
     const { id } = req.params;
     const { items } = req.body;
 
-    if (!Array.isArray(items) || items.length === 0) throw new Error("No items provided for revisit");
+    if (!Array.isArray(items) || items.length === 0)
+      throw new Error("No items provided for revisit");
 
     const pi = await ProformaInvoice.findByPk(id, {
       include: [{ model: PIItem, as: "items" }],
@@ -689,16 +773,28 @@ exports.revisitPI = async (req, res) => {
     });
 
     if (!pi) throw new Error("PI not found");
-    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status)) throw new Error("PI can only be revisited if status is ACTIVE, PENDING_APPROVAL, or CONFIRMED");
-    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) throw new Error("Unauthorized: You can only revise your own PIs");
+    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status))
+      throw new Error(
+        "PI can only be revisited if status is ACTIVE, PENDING_APPROVAL, or CONFIRMED",
+      );
+    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id)
+      throw new Error("Unauthorized: You can only revise your own PIs");
 
     const rateMap = {};
-    pi.items.forEach(i => { rateMap[i.product_id] = i.rate; });
+    pi.items.forEach((i) => {
+      rateMap[i.product_id] = i.rate;
+    });
 
-    const productIds = pi.items.map(i => i.product_id);
-    const stocks = await LeatherStock.findAll({ where: { product_id: { [Op.in]: productIds } }, transaction: t, lock: t.LOCK.UPDATE });
+    const productIds = pi.items.map((i) => i.product_id);
+    const stocks = await LeatherStock.findAll({
+      where: { product_id: { [Op.in]: productIds } },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
     const stockMap = {};
-    stocks.forEach(s => { stockMap[s.product_id] = s; });
+    stocks.forEach((s) => {
+      stockMap[s.product_id] = s;
+    });
 
     for (const oldItem of pi.items) {
       const stock = stockMap[oldItem.product_id];
@@ -712,12 +808,20 @@ exports.revisitPI = async (req, res) => {
       let batches = [];
       if (Array.isArray(oldItem.batch_info)) batches = oldItem.batch_info;
       else if (typeof oldItem.batch_info === "string") {
-        try { batches = JSON.parse(oldItem.batch_info); } catch { batches = []; }
+        try {
+          batches = JSON.parse(oldItem.batch_info);
+        } catch {
+          batches = [];
+        }
       }
-      batches = batches.filter(b => b && b.hide_id);
+      batches = batches.filter((b) => b && b.hide_id);
 
       for (const b of batches) {
-        const hideStock = await LeatherHideStock.findOne({ where: { hide_id: b.hide_id }, transaction: t, lock: t.LOCK.UPDATE });
+        const hideStock = await LeatherHideStock.findOne({
+          where: { hide_id: b.hide_id },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
         if (hideStock) {
           hideStock.qty += b.qty;
           hideStock.status = "AVAILABLE";
@@ -729,38 +833,78 @@ exports.revisitPI = async (req, res) => {
     await PIItem.destroy({ where: { pi_id: pi.id }, transaction: t });
 
     for (const item of items) {
-      if (!item.product_id || !item.qty || item.qty <= 0) throw new Error("Invalid item payload");
+      if (!item.product_id || !item.qty || item.qty <= 0)
+        throw new Error("Invalid item payload");
 
       const rate = rateMap[item.product_id];
-      if (rate === undefined || rate === null) throw new Error(`Rate not found for product ${item.product_id}. Cannot revisit PI`);
+      if (rate === undefined || rate === null)
+        throw new Error(
+          `Rate not found for product ${item.product_id}. Cannot revisit PI`,
+        );
 
-      const leatherStock = await LeatherStock.findOne({ where: { product_id: item.product_id }, transaction: t, lock: t.LOCK.UPDATE });
-      if (!leatherStock) throw new Error(`LeatherStock not found for product ${item.product_id}`);
-      if (leatherStock.available_qty < item.qty) throw new Error(`Insufficient available stock for product ${item.product_id}`);
+      const leatherStock = await LeatherStock.findOne({
+        where: { product_id: item.product_id },
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+      if (!leatherStock)
+        throw new Error(
+          `LeatherStock not found for product ${item.product_id}`,
+        );
+      if (leatherStock.available_qty < item.qty)
+        throw new Error(
+          `Insufficient available stock for product ${item.product_id}`,
+        );
 
-      const hideStocks = await LeatherHideStock.findAll({ where: { product_id: item.product_id, status: "AVAILABLE" }, attributes: ["id", "hide_id", "qty", "batch_no"], transaction: t, lock: t.LOCK.UPDATE });
-      if (hideStocks.length === 0) throw new Error(`No available hides for product ${item.product_id}`);
+      const hideStocks = await LeatherHideStock.findAll({
+        where: { product_id: item.product_id, status: "AVAILABLE" },
+        attributes: ["id", "hide_id", "qty", "batch_no"],
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+      if (hideStocks.length === 0)
+        throw new Error(`No available hides for product ${item.product_id}`);
 
-      const optimalCombination = findOptimalHidesCombinations(hideStocks.map(s => ({ hide_id: s.hide_id, qty: s.qty })), item.qty, 1);
-      if (!optimalCombination || optimalCombination.length === 0) throw new Error(`Cannot find hide combination for ${item.qty} sqft for product ${item.product_id}`);
+      const optimalCombination = findOptimalHidesCombinations(
+        hideStocks.map((s) => ({ hide_id: s.hide_id, qty: s.qty })),
+        item.qty,
+        1,
+      );
+      if (!optimalCombination || optimalCombination.length === 0)
+        throw new Error(
+          `Cannot find hide combination for ${item.qty} sqft for product ${item.product_id}`,
+        );
 
       const bestMatch = optimalCombination[0];
       const usedBatches = [];
 
       for (const hide of bestMatch.hides) {
-        const stock = hideStocks.find(s => s.hide_id === hide.hide_id);
+        const stock = hideStocks.find((s) => s.hide_id === hide.hide_id);
         if (!stock) throw new Error(`Hide ${hide.hide_id} not found`);
         stock.qty -= hide.hide_qty;
         stock.status = stock.qty <= 0 ? "RESERVED" : "AVAILABLE";
         await stock.save({ transaction: t });
-        usedBatches.push({ hide_id: stock.hide_id, batch_no: stock.batch_no, qty: hide.hide_qty });
+        usedBatches.push({
+          hide_id: stock.hide_id,
+          batch_no: stock.batch_no,
+          qty: hide.hide_qty,
+        });
       }
 
       leatherStock.available_qty -= bestMatch.allocated_qty;
       leatherStock.reserved_qty += bestMatch.allocated_qty;
       await leatherStock.save({ transaction: t });
 
-      await PIItem.create({ pi_id: pi.id, product_id: item.product_id, qty: bestMatch.allocated_qty, rate, batch_info: usedBatches }, { transaction: t });
+      await PIItem.create(
+        {
+          pi_id: pi.id,
+          product_id: item.product_id,
+          qty: bestMatch.allocated_qty,
+          rate,
+          batch_info: usedBatches,
+        },
+        { transaction: t },
+      );
     }
 
     pi.updatedAt = new Date();
@@ -773,7 +917,6 @@ exports.revisitPI = async (req, res) => {
   }
 };
 
-
 /**
  * Suggest batches for requested product quantity (HIDE-LEVEL)
  * Uses optimal hide combination selection algorithm
@@ -785,10 +928,16 @@ exports.suggestBatch = async (req, res) => {
 
   try {
     const { items, tolerance } = req.body;
-    if (!Array.isArray(items) || items.length === 0) throw new Error("No items provided");
+    if (!Array.isArray(items) || items.length === 0)
+      throw new Error("No items provided");
 
     // configurable tolerance in sqft (default 1 sqft)
-    const TOLERANCE = typeof tolerance === 'number' && !isNaN(tolerance) ? Math.abs(tolerance) : (tolerance ? Math.abs(Number(tolerance)) : 1);
+    const TOLERANCE =
+      typeof tolerance === "number" && !isNaN(tolerance)
+        ? Math.abs(tolerance)
+        : tolerance
+          ? Math.abs(Number(tolerance))
+          : 1;
     const response = [];
 
     /**
@@ -800,8 +949,8 @@ exports.suggestBatch = async (req, res) => {
 
       // Normalize hides: ensure numeric qty and stable order (largest first helps greedy fallback)
       const normalized = hideList
-        .map(h => ({ hide_id: h.hide_id, qty: Number(h.qty) }))
-        .filter(h => h.qty > 0)
+        .map((h) => ({ hide_id: h.hide_id, qty: Number(h.qty) }))
+        .filter((h) => h.qty > 0)
         .sort((a, b) => b.qty - a.qty);
 
       const combinations = [];
@@ -811,7 +960,7 @@ exports.suggestBatch = async (req, res) => {
       const MAX_EXHAUSTIVE = 20;
 
       if (n <= MAX_EXHAUSTIVE) {
-        for (let mask = 1; mask < (1 << n); mask++) {
+        for (let mask = 1; mask < 1 << n; mask++) {
           let total = 0;
           const selectedHides = [];
 
@@ -829,7 +978,10 @@ exports.suggestBatch = async (req, res) => {
             allocated_qty: Number(total.toFixed(2)),
             difference: Number(difference.toFixed(2)),
             distance: absDistance,
-            hides: selectedHides.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+            hides: selectedHides.map((h) => ({
+              hide_id: h.hide_id,
+              hide_qty: Number(h.qty.toFixed(2)),
+            })),
             withinTolerance: absDistance <= TOLERANCE,
           });
         }
@@ -846,7 +998,10 @@ exports.suggestBatch = async (req, res) => {
           allocated_qty: Number(running.toFixed(2)),
           difference: Number((running - requested_qty).toFixed(2)),
           distance: Math.abs(Number((running - requested_qty).toFixed(2))),
-          hides: sel.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+          hides: sel.map((h) => ({
+            hide_id: h.hide_id,
+            hide_qty: Number(h.qty.toFixed(2)),
+          })),
           withinTolerance: Math.abs(running - requested_qty) <= TOLERANCE,
         });
 
@@ -863,7 +1018,10 @@ exports.suggestBatch = async (req, res) => {
             allocated_qty: Number(total.toFixed(2)),
             difference: Number((total - requested_qty).toFixed(2)),
             distance: Math.abs(Number((total - requested_qty).toFixed(2))),
-            hides: selected.map(h => ({ hide_id: h.hide_id, hide_qty: Number(h.qty.toFixed(2)) })),
+            hides: selected.map((h) => ({
+              hide_id: h.hide_id,
+              hide_qty: Number(h.qty.toFixed(2)),
+            })),
             withinTolerance: Math.abs(total - requested_qty) <= TOLERANCE,
           });
         }
@@ -876,8 +1034,8 @@ exports.suggestBatch = async (req, res) => {
       });
 
       // Return top 5: prioritize within tolerance, then closest matches
-      const withinTolerance = combinations.filter(c => c.withinTolerance);
-      const outsideTolerance = combinations.filter(c => !c.withinTolerance);
+      const withinTolerance = combinations.filter((c) => c.withinTolerance);
+      const outsideTolerance = combinations.filter((c) => !c.withinTolerance);
 
       return [
         ...withinTolerance.slice(0, 5),
@@ -920,7 +1078,11 @@ exports.suggestBatch = async (req, res) => {
 
       // For each batch, find optimal hide combinations
       for (const [batch_no, hideList] of Object.entries(batchMap)) {
-        const suggestions = findOptimalHidesCombinations(hideList, requested_qty, TOLERANCE);
+        const suggestions = findOptimalHidesCombinations(
+          hideList,
+          requested_qty,
+          TOLERANCE,
+        );
 
         if (suggestions.length === 0) {
           batchResults.push({
@@ -936,7 +1098,7 @@ exports.suggestBatch = async (req, res) => {
           batchResults.push({
             batch_no,
             suggestions: suggestions,
-            bestSuggestion: suggestions[0]
+            bestSuggestion: suggestions[0],
           });
         }
       }
@@ -965,9 +1127,9 @@ exports.suggestBatch = async (req, res) => {
           product_id,
           requested_qty,
           exactMatch: true,
-          suggestions: exactMatches.map(b => ({
+          suggestions: exactMatches.map((b) => ({
             batch_no: b.batch_no,
-            ...b.bestSuggestion
+            ...b.bestSuggestion,
           })),
         });
         continue;
@@ -977,10 +1139,10 @@ exports.suggestBatch = async (req, res) => {
       const allSuggestions = [];
       for (const batch of batchResults) {
         if (batch.suggestions) {
-          batch.suggestions.forEach(s => {
+          batch.suggestions.forEach((s) => {
             allSuggestions.push({
               batch_no: batch.batch_no,
-              ...s
+              ...s,
             });
           });
         }
@@ -993,7 +1155,8 @@ exports.suggestBatch = async (req, res) => {
         requested_qty,
         exactMatch: false,
         suggestions: allSuggestions.slice(0, 5),
-        reason: "Multiple combinations available, ranked by closeness to requested quantity"
+        reason:
+          "Multiple combinations available, ranked by closeness to requested quantity",
       });
     }
 
@@ -1012,22 +1175,29 @@ exports.createPIConfirmed = async (req, res) => {
   });
 
   try {
-    const { customer_id, items, price_type } = req.body;
+    const { customer_id, items, price_type, company_name } = req.body;
 
     if (!customer_id) throw new Error("customer_id required");
     if (!price_type) throw new Error("price_type required");
-    if (!Array.isArray(items) || items.length === 0) throw new Error("No items provided");
+    if (!Array.isArray(items) || items.length === 0)
+      throw new Error("No items provided");
+    const company = company_name || COMPANY.MARVIN;
+
+    if (!COMPANY_LIST.includes(company)) {
+      throw new Error("Invalid company_name");
+    }
 
     // 1️⃣ Create PI
     // 🔐 RBAC: Set PI creator
     const pi = await ProformaInvoice.create(
       {
         customer_id,
+        company_name: company,
         created_by: req.user.id,
         status: "PENDING_APPROVAL",
         expires_at: new Date(Date.now() + 7 * 86400000),
       },
-      { transaction: t }
+      { transaction: t },
     );
 
     // 2️⃣ Process each item
@@ -1035,7 +1205,9 @@ exports.createPIConfirmed = async (req, res) => {
       const { product_id, batch_no, hides, collection_series_id } = item;
 
       if (!Array.isArray(hides) || hides.length === 0) {
-        throw new Error(`No hides selected for product ${product_id} batch ${batch_no}`);
+        throw new Error(
+          `No hides selected for product ${product_id} batch ${batch_no}`,
+        );
       }
 
       // 🔒 Lock selected hides
@@ -1048,7 +1220,9 @@ exports.createPIConfirmed = async (req, res) => {
       });
 
       if (hideRecords.length !== hides.length) {
-        throw new Error(`Some hides are no longer available for batch ${batch_no}`);
+        throw new Error(
+          `Some hides are no longer available for batch ${batch_no}`,
+        );
       }
 
       // 3️⃣ Reserve hides
@@ -1107,7 +1281,7 @@ exports.createPIConfirmed = async (req, res) => {
           rate: price.price,
           batch_info: batchInfo,
         },
-        { transaction: t }
+        { transaction: t },
       );
     }
 
@@ -1164,30 +1338,44 @@ exports.adminApprovePI = async (req, res) => {
 
     if (req.body.transport_amount != null && req.body.transport_amount !== "") {
       transportAmount = Number(req.body.transport_amount) || 0;
-      console.log(`Using manual transport_amount from request: ${transportAmount}`);
+      console.log(
+        `Using manual transport_amount from request: ${transportAmount}`,
+      );
     } else if (transport_type_id && weight_kg) {
       // Try to use transport type's base price
-      const transportType = await TransportType.findByPk(transport_type_id, { transaction: t });
+      const transportType = await TransportType.findByPk(transport_type_id, {
+        transaction: t,
+      });
       if (transportType && transportType.base_price) {
         transportAmount = Number(weight_kg) * Number(transportType.base_price);
-        console.log(`Auto transport: weight_kg ${weight_kg} × transportType.base_price ${transportType.base_price} = ${transportAmount}`);
+        console.log(
+          `Auto transport: weight_kg ${weight_kg} × transportType.base_price ${transportType.base_price} = ${transportAmount}`,
+        );
       } else {
         // Fallback: if weight_kg provided use default PRICE_PER_KG, else compute from hides
         if (weight_kg) {
           transportAmount = Number(weight_kg) * PRICE_PER_KG;
-          console.log(`Auto transport fallback using weight_kg ${weight_kg} × ${PRICE_PER_KG} = ${transportAmount}`);
+          console.log(
+            `Auto transport fallback using weight_kg ${weight_kg} × ${PRICE_PER_KG} = ${transportAmount}`,
+          );
         } else {
           // Count total hides and convert to kg
           let totalHides = 0;
           for (const item of pi.items) {
             let batchInfo = item.batch_info || [];
-            if (typeof batchInfo === 'string') {
-              try { batchInfo = JSON.parse(batchInfo); } catch (e) { batchInfo = []; }
+            if (typeof batchInfo === "string") {
+              try {
+                batchInfo = JSON.parse(batchInfo);
+              } catch (e) {
+                batchInfo = [];
+              }
             }
             if (Array.isArray(batchInfo)) totalHides += batchInfo.length;
           }
           transportAmount = totalHides * KG_PER_HIDE * PRICE_PER_KG;
-          console.log(`Auto transport fallback from hides: ${totalHides} hides × ${KG_PER_HIDE} kg/hide × ${PRICE_PER_KG} Rs/kg = ${transportAmount}`);
+          console.log(
+            `Auto transport fallback from hides: ${totalHides} hides × ${KG_PER_HIDE} kg/hide × ${PRICE_PER_KG} Rs/kg = ${transportAmount}`,
+          );
         }
       }
     }
@@ -1204,7 +1392,7 @@ exports.adminApprovePI = async (req, res) => {
         transport_amount: transportAmount,
         status: "CONFIRMED",
       },
-      { transaction: t }
+      { transaction: t },
     );
 
     await t.commit();
@@ -1232,7 +1420,13 @@ exports.getPendingApprovalPIs = async (req, res) => {
             {
               model: LeatherProduct,
               as: "product",
-              attributes: ["id", "leather_code", "color", "hsn_code", "image_url"],
+              attributes: [
+                "id",
+                "leather_code",
+                "color",
+                "hsn_code",
+                "image_url",
+              ],
             },
           ],
         },

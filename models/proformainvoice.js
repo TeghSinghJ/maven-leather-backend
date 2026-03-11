@@ -1,5 +1,6 @@
 "use strict";
 const { Model } = require("sequelize");
+const { COMPANY_LIST, COMPANY } = require("../src/constants/company.constants");
 
 module.exports = (sequelize, DataTypes) => {
   class ProformaInvoice extends Model {
@@ -43,7 +44,11 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         comment: "User ID who created this PI (Business Executive or Admin)",
       },
-
+      company_name: {
+        type: DataTypes.ENUM(...COMPANY_LIST),
+        allowNull: false,
+        defaultValue: COMPANY.MARVIN,
+      },
       status: {
         type: DataTypes.ENUM(
           "ACTIVE",
