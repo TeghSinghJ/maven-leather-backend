@@ -549,6 +549,7 @@ exports.downloadPI = async (req, res) => {
       attributes: [
         "id",
         "customer_id",
+        "company_name",
         "status",
         "createdAt",
         "transport_amount",
@@ -592,6 +593,7 @@ exports.downloadPI = async (req, res) => {
     const piData = pi.toJSON();
     if (piData.customer) {
       piData.customer_name = piData.customer.customer_name || "";
+      piData.company_name = piData.company_name || COMPANY.MARVIN;
       piData.address = piData.customer.address || "";
       piData.gst_number = piData.customer.gst_number || "-";
       piData.state = piData.customer.state || "";
@@ -599,6 +601,7 @@ exports.downloadPI = async (req, res) => {
       piData.contact = piData.customer.contact_number || "-";
     } else {
       piData.customer_name = piData.customer_name || "";
+            piData.company_name = piData.company_name || COMPANY.MARVIN;
       piData.address = piData.address || "";
       piData.gst_number = piData.gst_number || "-";
       piData.state = piData.state || "";

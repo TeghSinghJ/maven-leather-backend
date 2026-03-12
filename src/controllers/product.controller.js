@@ -83,8 +83,28 @@ exports.getProducts = async (req, res) => {
   try {
     const whereClause = {
       status: "ACTIVE",
-      ...(req.query.collection_series_id && { collection_series_id: req.query.collection_series_id }),
     };
+
+    // Support filtering by collection_series_id or by collection_id (main collection)
+    if (req.query.collection_series_id) {
+      whereClause.collection_series_id = req.query.collection_series_id;
+    } else if (req.query.collection_id) {
+      // Find all series that belong to this main collection
+      const seriesRows = await sequelize.models.CollectionSeries.findAll({
+        attributes: ['id'],
+        include: [
+          {
+            model: sequelize.models.SubCollection,
+            as: 'subCollection',
+            where: { main_collection_id: req.query.collection_id },
+            attributes: [],
+          },
+        ],
+        raw: true,
+      });
+      const seriesIds = seriesRows.map(r => r.id);
+      whereClause.collection_series_id = { [Op.in]: seriesIds.length ? seriesIds : [0] };
+    }
 
     const products = await LeatherProduct.findAll({
       where: whereClause,
@@ -98,8 +118,42 @@ exports.getProducts = async (req, res) => {
       order: [["createdAt", "DESC"]],
     });
 
-    res.json(products);
+    if (!products.length) return res.json([]);
+
+    // Load prices for all products
+    const seriesIds = [...new Set(products.map(p => p.collection_series_id))];
+    const prices = await CollectionPrice.findAll({
+      where: {
+        collection_series_id: { [Op.in]: seriesIds },
+        is_active: true,
+      },
+      attributes: ["collection_series_id", "price_type", "price"],
+      raw: true,
+    });
+
+    const priceMap = {};
+    prices.forEach(p => {
+      if (!priceMap[p.collection_series_id]) priceMap[p.collection_series_id] = {};
+      priceMap[p.collection_series_id][p.price_type] = p.price;
+    });
+
+    const result = products.map(prod => {
+      const p = prod.get({ plain: true });
+      return {
+        ...p,
+        available_qty: p.stock?.available_qty || 0,
+        total_qty: p.stock?.total_qty || 0,
+        reserved_qty: p.stock?.reserved_qty || 0,
+        quantity_price: {
+          DP: priceMap[p.collection_series_id]?.DP || 0,
+          RRP: priceMap[p.collection_series_id]?.RRP || 0,
+          ARCH: priceMap[p.collection_series_id]?.ARCH || 0,
+        },
+      };
+    });
+    res.json(result);
   } catch (error) {
+    console.error("getProducts error:", error);
     res.status(500).json({ error: error.message });
   }
 };

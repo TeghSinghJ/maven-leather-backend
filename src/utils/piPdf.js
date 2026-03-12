@@ -84,20 +84,28 @@ module.exports = function generateExactPIPdf(res, pi) {
   res.on("close", () => doc.end());
 
   try {
+    // Determine company based on pi.company_name
+    const isWestern = pi.company_name === 'WESTERN';
+    const company = isWestern ? PI_CONST.COMPANIES.WESTERN : PI_CONST.COMPANIES.MARVIN;
+
     const leftCol = 40;
     const midCol = 300;
     let currentY = 40;
 
     doc.rect(40, 40, 515, 750).stroke();
-
+    console.log("PI", pi);
+    console.log(pi.company_name);
+    // Company brand name
     doc
       .font("Helvetica-Bold")
       .fontSize(14)
-      .text("MARVIN", leftCol + 5, currentY + 10);
-    doc
-      .font("Helvetica")
-      .fontSize(8)
-      .text("lifestyle", leftCol + 5, currentY + 25);
+      .text(isWestern ? "WESTERN COLOUR" : "MARVIN", leftCol + 5, currentY + 10);
+    if (!isWestern) {
+      doc
+        .font("Helvetica")
+        .fontSize(8)
+        .text("lifestyle", leftCol + 5, currentY + 25);
+    }
     doc
       .font("Helvetica-Bold")
       .fontSize(12)
@@ -109,7 +117,7 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc
       .font("Helvetica-Bold")
       .fontSize(9)
-      .text(PI_CONST.COMPANY.name, leftCol + 5, currentY + 10, {
+      .text(company.name, leftCol + 5, currentY + 10, {
         width: 250,
         align: "left",
       });
@@ -117,20 +125,20 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc
       .font("Helvetica")
       .fontSize(8)
-      .text(PI_CONST.COMPANY.address, leftCol + 5, currentY + 22, {
+      .text(company.address, leftCol + 5, currentY + 22, {
         width: 250,
         align: "left",
       });
 
     doc.text(
-      `GSTIN/UIN: ${PI_CONST.COMPANY.gstin}`,
+      `GSTIN/UIN: ${company.gstin}`,
       leftCol + 5,
       currentY + 42,
       { width: 250, align: "left" },
     );
 
     doc.text(
-      `State Name: ${PI_CONST.COMPANY.state}, Code: ${PI_CONST.COMPANY.stateCode}`,
+      `State Name: ${company.state}, Code: ${company.stateCode}`,
       leftCol + 5,
       currentY + 52,
       { width: 250, align: "left" },
@@ -144,7 +152,7 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc.font("Helvetica").text("Invoice No.", midCol + 5, currentY + 10);
     doc
       .font("Helvetica-Bold")
-      .text(`MLM/PI/${pi.id}`, midCol + 100, currentY + 10);
+      .text(`${isWestern ? "WC/PI/2526/" : "MLM/PI/"}${pi.id}`, midCol + 100, currentY + 10);
     doc
       .moveTo(midCol, currentY + 25)
       .lineTo(555, currentY + 25)
@@ -248,8 +256,8 @@ module.exports = function generateExactPIPdf(res, pi) {
     });
 
     const sameState =
-      pi.state && PI_CONST.COMPANY.state &&
-      pi.state.trim().toLowerCase() === PI_CONST.COMPANY.state.trim().toLowerCase();
+      pi.state && company.state &&
+      pi.state.trim().toLowerCase() === company.state.trim().toLowerCase();
 
     const cgst = sameState ? (subtotal * PI_CONST.CGST) / 100 : 0;
     const sgst = sameState ? (subtotal * PI_CONST.SGST) / 100 : 0;
@@ -381,10 +389,10 @@ module.exports = function generateExactPIPdf(res, pi) {
       .text("Company's Bank Details", leftCol + 5, currentY + 6);
     doc
       .font("Helvetica")
-      .text("Bank Name: Bank of India OD Account", leftCol + 5, currentY + 18);
-    doc.text("A/c No: 840930110000045", leftCol + 5, currentY + 28);
+      .text(`Bank Name: ${company.bankName}`, leftCol + 5, currentY + 18);
+    doc.text(`A/c No: ${company.accountNo}`, leftCol + 5, currentY + 28);
     doc.text(
-      "Branch & IFS Code: Richmond Town & BKID0008409",
+      `Branch & IFS Code: ${company.branch} & ${company.ifsc}`,
       leftCol + 5,
       currentY + 38,
     );
@@ -392,7 +400,7 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc.moveTo(midCol, currentY).lineTo(midCol, 790).stroke();
     doc
       .font("Helvetica-Bold")
-      .text("for Marvin Lifestyle India Pvt. Ltd.", midCol + 20, currentY + 6);
+      .text(company.signature, midCol + 20, currentY + 6);
     doc.text("Authorised Signatory", midCol + 50, 770);
 
     doc
