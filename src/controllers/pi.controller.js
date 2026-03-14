@@ -1142,8 +1142,9 @@ exports.suggestBatch = async (req, res) => {
       const allSuggestions = [];
       for (const batch of batchResults) {
         if (batch.suggestions) {
-          batch.suggestions.forEach((s) => {
+          batch.suggestions.forEach((s,i) => {
             allSuggestions.push({
+              suggestion_id: `${batch.batch_no}_${i}`,
               batch_no: batch.batch_no,
               ...s,
             });
