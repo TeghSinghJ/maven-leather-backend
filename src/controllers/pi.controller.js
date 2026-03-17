@@ -8,6 +8,9 @@ const {
   TransportType,
   Transport,
   LeatherProduct,
+  CollectionSeries,
+  SubCollection,
+  MainCollection,
   sequelize,
 } = require("../../models");
 const { Op, Transaction } = require("sequelize");
@@ -925,22 +928,21 @@ exports.revisitPI = async (req, res) => {
  * Uses optimal hide combination selection algorithm
  */
 exports.suggestBatch = async (req, res) => {
-  const t = await sequelize.transaction({
-    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
-  });
-
   try {
-    const { items, tolerance } = req.body;
+    const { items, collection_id } = req.body;
     if (!Array.isArray(items) || items.length === 0)
       throw new Error("No items provided");
 
+    // Check if it's Vitton collection
+    let isVittonColl = false;
+    if (collection_id) {
+      const mainColl = await MainCollection.findByPk(collection_id, { attributes: ['name'] });
+      isVittonColl = mainColl?.name?.toLowerCase().includes('vitton');
+      console.log('collection_id:', collection_id, 'mainColl.name:', mainColl?.name, 'isVittonColl:', isVittonColl);
+    }
+
     // configurable tolerance in sqft (default 1 sqft)
-    const TOLERANCE =
-      typeof tolerance === "number" && !isNaN(tolerance)
-        ? Math.abs(tolerance)
-        : tolerance
-          ? Math.abs(Number(tolerance))
-          : 1;
+    const TOLERANCE = 1;
     const response = [];
 
     /**
@@ -1051,13 +1053,82 @@ exports.suggestBatch = async (req, res) => {
       if (!product_id || requested_qty == null)
         throw new Error("product_id and requested_qty are required");
 
-      const hides = await LeatherHideStock.findAll({
-        where: { product_id, status: "AVAILABLE" },
-        attributes: ["batch_no", "qty", "hide_id"],
-        transaction: t,
-        lock: t.LOCK.SHARE,
-        raw: true,
-      });
+      // Check if it's Vitton collection
+      const isVitton = isVittonColl;
+      
+      // Fallback: if not detected from collection_id, check product's main collection
+      let actualIsVitton = isVitton;
+      if (!actualIsVitton) {
+        const product = await LeatherProduct.findOne({
+          where: { id: product_id },
+          include: [
+            {
+              model: CollectionSeries,
+              as: 'series',
+              include: [
+                {
+                  model: SubCollection,
+                  as: 'subCollection',
+                  include: [
+                    {
+                      model: MainCollection,
+                      as: 'mainCollection',
+                      attributes: ['name'],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+        actualIsVitton = product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton');
+      }
+      
+      if (actualIsVitton) {
+        // For Vitton, use LeatherStock as a single "roll"
+        const stock = await LeatherStock.findOne({
+          where: { product_id },
+          attributes: ['available_qty'],
+          order: [['available_qty', 'DESC']], // Get the one with most available qty
+        });
+        if (!stock || stock.available_qty <= 0) {
+          response.push({
+            product_id,
+            requested_qty,
+            exactMatch: false,
+            suggestions: [],
+            reason: "No roll stock available",
+          });
+          continue;
+        }
+        // Create suggestion for Vitton roll, even if partial
+        const allocated = Math.min(requested_qty, stock.available_qty);
+        const suggestion = {
+          suggestion_id: "ROLL_0",
+          batch_no: "ROLL",
+          allocated_qty: allocated,
+          difference: allocated - requested_qty,
+          distance: Math.abs(allocated - requested_qty),
+          hides: [{ hide_id: "roll", hide_qty: allocated }],
+          withinTolerance: true, // Always true for Vitton direct approval
+          isBestMatch: true
+        };
+        response.push({
+          product_id,
+          requested_qty,
+          exactMatch: false,
+          suggestions: [suggestion],
+          reason: "Roll stock available",
+        });
+        continue;
+      } else {
+        // Original logic for hides
+        hides = await LeatherHideStock.findAll({
+          where: { product_id, status: "AVAILABLE" },
+          attributes: ["batch_no", "qty", "hide_id"],
+          raw: true,
+        });
+      }
 
       if (!hides.length) {
         response.push({
@@ -1065,7 +1136,7 @@ exports.suggestBatch = async (req, res) => {
           requested_qty,
           exactMatch: false,
           suggestions: [],
-          reason: "No available hides",
+          reason: actualIsVitton ? "No available roll stock" : "No available hides",
         });
         continue;
       }
@@ -1164,12 +1235,10 @@ exports.suggestBatch = async (req, res) => {
       });
     }
 
-    await t.commit();
     res.json(response);
   } catch (err) {
-    await t.rollback();
     console.error("suggestBatch error:", err);
-    res.status(400).json({ error: err.message });
+    res.status(500).json({ error: err.message });
   }
 };
 
@@ -1205,8 +1274,9 @@ exports.createPIConfirmed = async (req, res) => {
     );
 
     // 2️⃣ Process each item
+    let allVitton = true;
     for (const item of items) {
-      const { product_id, batch_no, hides, collection_series_id } = item;
+      const { product_id, batch_no, hides, collection_series_id, requested_qty } = item;
 
       if (!Array.isArray(hides) || hides.length === 0) {
         throw new Error(
@@ -1214,55 +1284,124 @@ exports.createPIConfirmed = async (req, res) => {
         );
       }
 
-      // 🔒 Lock selected hides
-      const hideIds = hides.map((h) => h.hide_id);
-      const hideRecords = await LeatherHideStock.findAll({
-        where: { hide_id: hideIds, status: "AVAILABLE" },
+      // Check if Vitton and roll
+      const product = await LeatherProduct.findOne({
+        where: { id: product_id },
+        include: [
+          {
+            model: CollectionSeries,
+            as: 'series',
+            include: [
+              {
+                model: SubCollection,
+                as: 'subCollection',
+                include: [
+                  {
+                    model: MainCollection,
+                    as: 'mainCollection',
+                    attributes: ['name'],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
         transaction: t,
-        lock: t.LOCK.UPDATE,
-        order: [["id", "ASC"]],
       });
 
-      if (hideRecords.length !== hides.length) {
-        throw new Error(
-          `Some hides are no longer available for batch ${batch_no}`,
-        );
-      }
+      const isVittonRoll = product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton') && hides[0].hide_id === 'roll';
 
-      // 3️⃣ Reserve hides
+      console.log('Product lookup result:', {
+        product_id,
+        product_found: !!product,
+        main_collection_name: product?.series?.subCollection?.mainCollection?.name,
+        hide_id: hides[0].hide_id,
+        isVittonRoll
+      });
+
+      if (!isVittonRoll) allVitton = false;
+
       let allocatedQty = 0;
       const batchInfo = [];
 
-      for (const h of hideRecords) {
-        const hideQty = hides.find((x) => x.hide_id === h.hide_id).hide_qty;
-
-        allocatedQty += hideQty;
+      if (isVittonRoll) {
+        // For Vitton roll, allocate from LeatherStock (cap to requested quantity)
+        const requestedQty = Number(requested_qty) || 0;
+        allocatedQty = Math.min(hides[0].hide_qty, requestedQty || hides[0].hide_qty);
         batchInfo.push({
-          hide_id: h.hide_id,
-          batch_no,
-          qty: hideQty,
+          hide_id: 'roll',
+          batch_no: 'ROLL',
+          qty: allocatedQty,
         });
 
-        // Update hide stock
-        h.qty -= hideQty;
-        if (h.qty <= 0) h.status = "RESERVED";
-        await h.save({ transaction: t });
+        // Update stock for Vitton
+        const stock = await LeatherStock.findOne({
+          where: { product_id },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+
+        if (!stock || stock.available_qty < allocatedQty) {
+          if (isVittonRoll) {
+            allocatedQty = stock ? stock.available_qty : 0;
+          } else {
+            throw new Error(`Insufficient stock for product ${product_id}`);
+          }
+        }
+
+        if (allocatedQty > 0) {
+          stock.available_qty -= allocatedQty;
+          stock.reserved_qty += allocatedQty;
+          await stock.save({ transaction: t });
+        }
+      } else {
+        // 🔒 Lock selected hides
+        const hideIds = hides.map((h) => h.hide_id);
+        const hideRecords = await LeatherHideStock.findAll({
+          where: { hide_id: hideIds, status: "AVAILABLE" },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+          order: [["id", "ASC"]],
+        });
+
+        if (hideRecords.length !== hides.length) {
+          throw new Error(
+            `Some hides are no longer available for batch ${batch_no}`,
+          );
+        }
+
+        // 3️⃣ Reserve hides
+        for (const h of hideRecords) {
+          const hideQty = hides.find((x) => x.hide_id === h.hide_id).hide_qty;
+
+          allocatedQty += hideQty;
+          batchInfo.push({
+            hide_id: h.hide_id,
+            batch_no,
+            qty: hideQty,
+          });
+
+          // Update hide stock
+          h.qty -= hideQty;
+          if (h.qty <= 0) h.status = "RESERVED";
+          await h.save({ transaction: t });
+        }
+
+        // 4️⃣ Update product stock
+        const stock = await LeatherStock.findOne({
+          where: { product_id },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+
+        if (!stock || stock.available_qty < allocatedQty) {
+          throw new Error(`Insufficient stock for product ${product_id}`);
+        }
+
+        stock.available_qty -= allocatedQty;
+        stock.reserved_qty += allocatedQty;
+        await stock.save({ transaction: t });
       }
-
-      // 4️⃣ Update product stock
-      const stock = await LeatherStock.findOne({
-        where: { product_id },
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      });
-
-      if (!stock || stock.available_qty < allocatedQty) {
-        throw new Error(`Insufficient stock for product ${product_id}`);
-      }
-
-      stock.available_qty -= allocatedQty;
-      stock.reserved_qty += allocatedQty;
-      await stock.save({ transaction: t });
 
       // 5️⃣ Fetch price
       const price = await CollectionPrice.findOne({
@@ -1289,9 +1428,14 @@ exports.createPIConfirmed = async (req, res) => {
       );
     }
 
+    // Vitton PIs go to pending approval like others
+    // if (allVitton) {
+    //   await pi.update({ status: "APPROVED" }, { transaction: t });
+    // }
+
     await t.commit();
     res.status(201).json({
-      message: "PI created & sent for approval",
+      message: allVitton ? "PI created & auto-approved" : "PI created & sent for approval",
       pi_id: pi.id,
     });
   } catch (err) {
@@ -1314,6 +1458,8 @@ exports.adminApprovePI = async (req, res) => {
       transport_payment_status,
       delivery_address,
       receiver_courier_name,
+      perforation_qty,
+      perforation_payment_status,
     } = req.body;
 
     const pi = await ProformaInvoice.findByPk(id, {
@@ -1384,7 +1530,24 @@ exports.adminApprovePI = async (req, res) => {
       }
     }
 
-    // 🔹 Update PI - Always save transport_amount, regardless of payment status
+    // 🔹 Determine perforation amount
+    let perforationAmount = 0;
+    const PRICE_PER_SQFT_PERF = 50; // Rs per sqft for perforation
+
+    if (req.body.perforation_amount != null && req.body.perforation_amount !== "") {
+      perforationAmount = Number(req.body.perforation_amount) || 0;
+      console.log(
+        `Using manual perforation_amount from request: ${perforationAmount}`,
+      );
+    } else if (perforation_qty != null && perforation_qty > 0) {
+      // Auto calculate based on perforation_qty (in sqft) entered by user
+      perforationAmount = Number(perforation_qty) * PRICE_PER_SQFT_PERF;
+      console.log(
+        `Auto perforation: perforation_qty ${perforation_qty} sqft × ${PRICE_PER_SQFT_PERF} Rs/sqft = ${perforationAmount}`,
+      );
+    }
+
+    // 🔹 Update PI - Always save transport_amount and perforation_amount, regardless of payment status
     await pi.update(
       {
         transport_type_id,
@@ -1394,6 +1557,9 @@ exports.adminApprovePI = async (req, res) => {
         delivery_address,
         receiver_courier_name,
         transport_amount: transportAmount,
+        perforation_qty: perforation_qty || 0,
+        perforation_amount: perforationAmount,
+        perforation_payment_status,
         status: "CONFIRMED",
       },
       { transaction: t },

@@ -1,4 +1,4 @@
-const { LeatherProduct, LeatherStock,LeatherHideStock,CollectionPrice, sequelize } = require("../../models");
+const { LeatherProduct, LeatherStock,LeatherHideStock,CollectionPrice, sequelize, CollectionSeries, SubCollection, MainCollection } = require("../../models");
 const { body, validationResult } = require("express-validator");
 const { Op, fn ,col} = require("sequelize"); // 👈 REQUIRED
 
@@ -114,6 +114,23 @@ exports.getProducts = async (req, res) => {
           as: "stock",
           attributes: ["total_qty", "available_qty", "reserved_qty"],
         },
+        {
+          model: CollectionSeries,
+          as: "series",
+          include: [
+            {
+              model: SubCollection,
+              as: "subCollection",
+              include: [
+                {
+                  model: MainCollection,
+                  as: "mainCollection",
+                  attributes: ["id", "name"],
+                },
+              ],
+            },
+          ],
+        },
       ],
       order: [["createdAt", "DESC"]],
     });
@@ -144,6 +161,7 @@ exports.getProducts = async (req, res) => {
         available_qty: p.stock?.available_qty || 0,
         total_qty: p.stock?.total_qty || 0,
         reserved_qty: p.stock?.reserved_qty || 0,
+        main_collection_name: p.series?.subCollection?.mainCollection?.name || null,
         quantity_price: {
           DP: priceMap[p.collection_series_id]?.DP || 0,
           RRP: priceMap[p.collection_series_id]?.RRP || 0,
