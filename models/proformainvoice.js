@@ -93,6 +93,16 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.FLOAT,
         defaultValue: 0,
       },
+      billing_address: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        comment: "Billing address for the customer",
+      },
+      shipping_address: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        comment: "Shipping address (can differ from billing address). Admin can manually enter for each PI",
+      },
     },
     {
       sequelize,

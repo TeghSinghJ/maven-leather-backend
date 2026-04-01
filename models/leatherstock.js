@@ -6,6 +6,16 @@ module.exports = (sequelize, DataTypes) => {
       total_qty: DataTypes.FLOAT,
       available_qty: DataTypes.FLOAT,
       reserved_qty: DataTypes.FLOAT,
+      location: {
+        type: DataTypes.ENUM('Bangalore', 'Delhi', 'Mumbai'),
+        defaultValue: 'Bangalore',
+        comment: 'Stock location/branch (Bangalore, Delhi, Mumbai)',
+      },
+      estimated_delivery_date: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        comment: 'Estimated delivery date for low stock items',
+      },
     },
     { tableName: "leather_stocks" }
   );

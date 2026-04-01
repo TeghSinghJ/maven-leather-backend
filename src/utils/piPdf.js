@@ -102,24 +102,70 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   y += 100;
 
-  /* ---------- CUSTOMER ---------- */
+  console.log("📄 PDF Generation - PI Addresses:", {
+    pi_id: pi.id,
+    billing_address: pi.billing_address,
+    shipping_address: pi.shipping_address,
+    address: pi.address,
+  });
 
-  doc
-    .font("Helvetica")
-    .fontSize(10)
-    .text("Bill To", 40, y);
+  /* ---------- BILLING ADDRESS ---------- */
 
   doc
     .font("Helvetica-Bold")
-    .text(pi.customer_name, 40, y + 15);
+    .fontSize(11)
+    .text("BILL TO:", 40, y);
+
+  doc
+    .font("Helvetica-Bold")
+    .fontSize(10)
+    .text(pi.customer_name, 40, y + 18);
 
   doc
     .font("Helvetica")
-    .text(pi.address, 40, y + 30, { width: 250 });
+    .fontSize(9)
+    .text(pi.billing_address || pi.address, 40, y + 35, { width: 260 });
 
-  doc.text(`GSTIN: ${pi.gst_number || "-"}`, 40, y + 55);
-  doc.text(`State: ${pi.state}`, 40, y + 70);
-  doc.text(`Contact: ${pi.contact || "-"}`, 40, y + 85);
+  doc
+    .font("Helvetica")
+    .fontSize(9)
+    .text(`GSTIN: ${pi.gst_number || "-"}`, 40, y + 60);
+  
+  doc.text(`State: ${pi.state}`, 40, y + 73);
+  doc.text(`Contact: ${pi.contact || "-"}`, 40, y + 86);
+
+  /* ---------- SHIPPING ADDRESS (if different) ---------- */
+  const billAddr = (pi.billing_address || pi.address || "").trim();
+  const shipAddr = (pi.shipping_address || "").trim();
+  
+  console.log("📍 Address Comparison:", {
+    billAddr: `"${billAddr}"`,
+    shipAddr: `"${shipAddr}"`,
+    isShipAddrEmpty: !shipAddr,
+    isDifferent: shipAddr !== billAddr,
+    willShowShipTo: shipAddr && shipAddr !== billAddr,
+  });
+  
+  if (shipAddr && shipAddr !== billAddr) {
+    console.log("✅ Adding SHIP TO section");
+    
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(11)
+      .text("SHIP TO:", 350, y);
+    
+    doc
+      .font("Helvetica-Bold")
+      .fontSize(10)
+      .text(pi.customer_name, 350, y + 18);
+    
+    doc
+      .font("Helvetica")
+      .fontSize(9)
+      .text(shipAddr, 350, y + 35, { width: 190 });
+  } else {
+    console.log("❌ SHIP TO section NOT added - Condition not met");
+  }
 
   y += 120;
 

@@ -132,3 +132,56 @@ exports.updateStatus = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+// 🎯 NEW: Update individual hide details
+exports.updateHide = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { hide_code, batch_no, qty, grade, remarks } = req.body;
+
+    const hide = await LeatherHideStock.findByPk(id);
+    if (!hide) return res.status(404).json({ message: "Hide not found" });
+
+    // Update fields
+    if (hide_code !== undefined) hide.hide_code = hide_code;
+    if (batch_no !== undefined) hide.batch_no = batch_no;
+
+    if (qty !== undefined) {
+      const qtyValue = Number(qty);
+      if (Number.isNaN(qtyValue) || qtyValue < 0) {
+        return res.status(400).json({ message: "Invalid quantity value" });
+      }
+      hide.qty = qtyValue;
+    }
+
+    if (grade !== undefined) hide.grade = grade;
+    if (remarks !== undefined) hide.remarks = remarks;
+
+    await hide.save();
+    await recalculateLeatherStock(hide.product_id);
+
+    res.json({ message: "Hide updated successfully", hide });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// 🎯 NEW: Delete individual hide
+exports.deleteHide = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const hide = await LeatherHideStock.findByPk(id);
+    if (!hide) return res.status(404).json({ message: "Hide not found" });
+
+    const productId = hide.product_id;
+    await hide.destroy();
+    await recalculateLeatherStock(productId);
+
+    res.json({ message: "Hide deleted successfully" });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+};

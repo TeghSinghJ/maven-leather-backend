@@ -106,13 +106,19 @@ exports.getProducts = async (req, res) => {
       whereClause.collection_series_id = { [Op.in]: seriesIds.length ? seriesIds : [0] };
     }
 
+    // Get location from query params, default to Bangalore
+    const location = req.query.location || 'Bangalore';
+    const stockWhereClause = { location };
+
     const products = await LeatherProduct.findAll({
       where: whereClause,
       include: [
         {
           model: LeatherStock,
           as: "stock",
-          attributes: ["total_qty", "available_qty", "reserved_qty"],
+          where: stockWhereClause,
+          attributes: ["total_qty", "available_qty", "reserved_qty", "location"],
+          required: false, // LEFT JOIN to include products even if no stock for this location
         },
         {
           model: CollectionSeries,
@@ -161,6 +167,7 @@ exports.getProducts = async (req, res) => {
         available_qty: p.stock?.available_qty || 0,
         total_qty: p.stock?.total_qty || 0,
         reserved_qty: p.stock?.reserved_qty || 0,
+        location: p.stock?.location || location,
         main_collection_name: p.series?.subCollection?.mainCollection?.name || null,
         quantity_price: {
           DP: priceMap[p.collection_series_id]?.DP || 0,
@@ -297,6 +304,111 @@ exports.getAvailableProducts = async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error("getAvailableProducts error:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// 🎯 Get collection details with all colors and hide-wise breakdown
+exports.getCollectionDetails = async (req, res) => {
+  try {
+    const { collection_id } = req.params; // MainCollection ID
+    const location = req.query.location || 'Bangalore';
+
+    // Step 1: Find all series that belong to this collection
+    const seriesData = await sequelize.models.CollectionSeries.findAll({
+      attributes: ['id', 'name'],
+      include: [
+        {
+          model: sequelize.models.SubCollection,
+          as: 'subCollection',
+          attributes: ['id', 'name', 'main_collection_id'],
+          where: { main_collection_id: collection_id },
+        },
+      ],
+      raw: true,
+    });
+
+    if (!seriesData.length) {
+      return res.json({
+        collection_id,
+        collection_name: null,
+        colors: [],
+        total_colors: 0,
+        total_qty: 0,
+      });
+    }
+
+    const seriesIds = seriesData.map(s => s.id);
+
+    // Step 2: Get all products (colors) for these series
+    const products = await LeatherProduct.findAll({
+      where: {
+        collection_series_id: { [Op.in]: seriesIds },
+        status: 'ACTIVE',
+      },
+      include: [
+        {
+          model: LeatherStock,
+          as: 'stock',
+          attributes: ['total_qty', 'available_qty', 'reserved_qty', 'location'],
+          where: { location },
+          required: false,
+        },
+        {
+          model: LeatherHideStock,
+          as: 'batches',
+          attributes: ['id', 'hide_code', 'batch_no', 'qty', 'grade', 'remarks', 'status'],
+        },
+        {
+          model: CollectionSeries,
+          as: 'series',
+        },
+      ],
+      order: [['color', 'ASC']],
+    });
+
+    // Step 3: Format the response
+    const colors = products.map(product => {
+      const plain = product.get({ plain: true });
+      const batches = plain.batches || [];
+      
+      return {
+        id: plain.id,
+        color: plain.color,
+        leather_code: plain.leather_code,
+        description: plain.description,
+        image_url: plain.image_url,
+        total_qty: plain.stock?.total_qty || 0,
+        available_qty: plain.stock?.available_qty || 0,
+        reserved_qty: plain.stock?.reserved_qty || 0,
+        location: plain.stock?.location || location,
+        hides: batches.map(batch => ({
+          id: batch.id,
+          hide_code: batch.hide_code,
+          batch_no: batch.batch_no,
+          qty: batch.qty,
+          grade: batch.grade,
+          remarks: batch.remarks,
+          status: batch.status,
+        })),
+        total_hides: batches.length,
+        total_hide_qty: batches.reduce((sum, b) => sum + (b.qty || 0), 0),
+      };
+    });
+
+    // Get collection name
+    const mainCollection = await MainCollection.findByPk(collection_id);
+
+    res.json({
+      collection_id,
+      collection_name: mainCollection?.name || null,
+      colors,
+      total_colors: colors.length,
+      total_qty: colors.reduce((sum, c) => sum + (c.total_qty || 0), 0),
+      total_available_qty: colors.reduce((sum, c) => sum + (c.available_qty || 0), 0),
+    });
+  } catch (error) {
+    console.error("getCollectionDetails error:", error);
     res.status(500).json({ error: error.message });
   }
 };
