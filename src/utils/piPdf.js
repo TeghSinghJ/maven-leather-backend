@@ -1,4 +1,6 @@
 const PDFDocument = require("pdfkit");
+const fs = require("fs");
+const path = require("path");
 const PI_CONST = require("../../config/pi.constants");
 const { COMPANY } = require("../constants/company.constants");
 
@@ -47,18 +49,13 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   /* ---------- HEADER ---------- */
 
-  doc
-    .font("Helvetica-Bold")
-    .fontSize(16)
-    .text(isWestern ? "WESTERN COLOUR" : "MARVIN", 40, y);
-
-  if (!isWestern) {
-    doc
-      .font("Helvetica")
-      .fontSize(9)
-      .text("lifestyle", 40, y + 18);
+  const logoPath = path.resolve(__dirname, "../../assets/logo.png");
+  if (fs.existsSync(logoPath)) {
+    doc.image(logoPath, 40, y, { width: 100 });
+    y += 90; // push content further down to avoid overlap with text
   }
 
+  // invoice title
   doc
     .font("Helvetica-Bold")
     .fontSize(14)

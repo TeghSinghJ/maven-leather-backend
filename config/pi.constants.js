@@ -1,7 +1,7 @@
 module.exports = {
   COMPANIES: {
     MARVIN: {
-      name: "Marvin Leather Experience Centre",
+      name: "Marvin life style pvt limited",
       address: "47, Wilson Garden, Hosur Main Road, Bengaluru, Karnataka 560027, India",
       gstin: "29ABCDE1234F1Z5",
       state: "Karnataka",
@@ -29,7 +29,7 @@ module.exports = {
   },
   // Legacy support - default to MARVIN
   COMPANY: {
-    name: "Marvin Leather Experience Centre",
+    name: "marvin life style pvt limited",
     address: "47, Wilson Garden, Hosur Main Road, Bengaluru, Karnataka 560027, India",
     gstin: "29ABCDE1234F1Z5",
     state: "Karnataka",
