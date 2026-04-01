@@ -27,7 +27,7 @@ function amountInWords(num) {
 }
 
 module.exports = function generateExactPIPdf(res, pi) {
-
+  console.log("PI",pi)
   const doc = new PDFDocument({
     size: "A4",
     margin: 40
@@ -83,6 +83,12 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   /* ---------- INVOICE INFO ---------- */
 
+  const invoiceDate = new Date(pi.createdAt || new Date());
+  const invoiceYear = invoiceDate.getFullYear();
+  const fyStart = String(invoiceYear % 100).padStart(2, "0");
+  const fyEnd = String((invoiceYear + 1) % 100).padStart(2, "0");
+  const financialYear = `${fyStart}${fyEnd}`;
+  const invoiceIdNumber = Number(pi.id)-105;
   doc
     .font("Helvetica")
     .fontSize(10)
@@ -90,7 +96,11 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   doc
     .font("Helvetica-Bold")
-    .text(`${isWestern ? "WC/PI/2526/" : "MLM/PI/"}${pi.id}`, 430, y);
+    .text(
+      `${isWestern ? "WC/PI/2526/" : "MLM/PI/"}${financialYear}/${invoiceIdNumber}`,
+      430,
+      y,
+    );
 
   doc
     .font("Helvetica")
@@ -237,54 +247,64 @@ module.exports = function generateExactPIPdf(res, pi) {
   let total = subtotal + cgst + sgst + igst;
 
   let transportCharge = 0;
+  let transportGst = 0;
+
+  // Transport GST is always 5% as per user requirement.
+  const transportGstPercent = 5;
 
   if (pi.transport_amount > 0) {
     transportCharge = pi.transport_amount;
-    total += transportCharge;
+    transportGst = transportCharge * transportGstPercent / 100;
+    total += transportCharge + transportGst;
   }
+
+  const roundedTotal = Math.round(total);
+  const roundOff = Number((roundedTotal - total).toFixed(2));
+  const finalTotal = Number((total + roundOff).toFixed(2));
 
   y += 20;
 
   doc.font("Helvetica");
 
-  if (sameState) {
-
-    doc.text(`CGST ${PI_CONST.CGST}%`, 400, y);
-    doc.text(cgst.toFixed(2), 520, y, { align: "right" });
-
-    y += 15;
-
-    doc.text(`SGST ${PI_CONST.SGST}%`, 400, y);
-    doc.text(sgst.toFixed(2), 520, y, { align: "right" });
-
-    y += 15;
-
-  } else {
-
-    doc.text(`IGST ${PI_CONST.IGST}%`, 400, y);
-    doc.text(igst.toFixed(2), 520, y, { align: "right" });
-
-    y += 15;
-
-  }
-
   if (transportCharge > 0) {
+    console.log(transportCharge, transportGst);
+  doc.text("Transport", 400, y);
+  doc.text(Number(transportCharge.toFixed(2))+Number(transportGst.toFixed(2)  ), 520, y, { align: "right" });
+  // y += 15;
 
-    doc.text("Transport", 400, y);
-    doc.text(transportCharge.toFixed(2), 520, y, { align: "right" });
+  // doc.text(`Transport GST (${transportGstPercent}%)`, 400, y);
+  // doc.text(transportGst.toFixed(2), 520, y, { align: "right" });
+  y += 15;
+}
 
-    y += 15;
+if (sameState) {
+  doc.text(`CGST ${PI_CONST.CGST}%`, 400, y);
+  doc.text(cgst.toFixed(2), 520, y, { align: "right" });
+  y += 15;
 
-  }
+  doc.text(`SGST ${PI_CONST.SGST}%`, 400, y);
+  doc.text(sgst.toFixed(2), 520, y, { align: "right" });
+  y += 15;
+} else {
+  doc.text(`IGST ${PI_CONST.IGST}%`, 400, y);
+  doc.text(igst.toFixed(2), 520, y, { align: "right" });
+  y += 15;
+}
+
+y += 5;
 
   /* ---------- TOTAL ---------- */
+
+  doc.text("Round Off", 400, y);
+  doc.text(roundOff.toFixed(2), 520, y, { align: "right" });
+  y += 15;
 
   doc
     .font("Helvetica-Bold")
     .fontSize(11)
     .text("Total", 400, y);
 
-  doc.text(total.toFixed(2), 520, y, {
+  doc.text(finalTotal.toFixed(2), 500, y, {
     align: "right"
   });
 
@@ -299,7 +319,7 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   doc
     .font("Helvetica-Bold")
-    .text(amountInWords(total), 40, y + 15);
+    .text(amountInWords(finalTotal), 40, y + 15);
 
   y += 70;
 

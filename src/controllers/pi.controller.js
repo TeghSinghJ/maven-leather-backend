@@ -151,8 +151,6 @@ exports.createPI = async (req, res) => {
       if (!transportType) throw new Error("Invalid transport type");
       transportAmount = weight_kg * Number(transportType.base_price);
     }
-    const finalTransportAmount =
-      transport_payment_status === "PAID" ? 0 : transportAmount;
 
     // 🔐 RBAC: Set PI creator and location
     const pi = await ProformaInvoice.create(
@@ -164,7 +162,7 @@ exports.createPI = async (req, res) => {
         transport_id,
         weight_kg,
         transport_payment_status,
-        transport_amount: finalTransportAmount,
+        transport_amount: transportAmount,
         status: "ACTIVE",
         expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
@@ -1455,6 +1453,7 @@ exports.adminApprovePI = async (req, res) => {
       transport_type_id,
       transport_id,
       weight_kg,
+      transport_name,
       transport_payment_status,
       delivery_address,
       receiver_courier_name,
@@ -1553,6 +1552,7 @@ exports.adminApprovePI = async (req, res) => {
         transport_type_id,
         transport_id,
         weight_kg,
+        transport_name,
         transport_payment_status,
         delivery_address,
         receiver_courier_name,
