@@ -133,11 +133,21 @@ exports.createPI = async (req, res) => {
       items,
       price_type,
       delivery_address,
+      billing_address,
+      shipping_address,
       transport_type_id,
       transport_id,
       weight_kg,
       transport_payment_status,
     } = req.body;
+
+    console.log("CREATE PI REQUEST:", {
+      customer_id,
+      delivery_address,
+      billing_address,
+      shipping_address,
+      hasItems: Array.isArray(items)
+    });
 
     if (!Array.isArray(items) || items.length === 0) {
       throw new Error("No items provided for PI");
@@ -158,6 +168,8 @@ exports.createPI = async (req, res) => {
         customer_id,
         created_by: req.user.id,
         delivery_address,
+        billing_address,
+        shipping_address,
         transport_type_id,
         transport_id,
         weight_kg,
@@ -556,6 +568,8 @@ exports.downloadPI = async (req, res) => {
         "transport_amount",
         "transport_payment_status",
         "delivery_address",
+        "billing_address",
+        "shipping_address",
         "weight_kg",
       ],
       include: [
@@ -602,13 +616,19 @@ exports.downloadPI = async (req, res) => {
       piData.contact = piData.customer.contact_number || "-";
     } else {
       piData.customer_name = piData.customer_name || "";
-            piData.company_name = piData.company_name || COMPANY.MARVIN;
+      piData.company_name = piData.company_name || COMPANY.MARVIN;
       piData.address = piData.address || "";
       piData.gst_number = piData.gst_number || "-";
       piData.state = piData.state || "";
       piData.pin_code = piData.pin_code || "";
       piData.contact = piData.contact || "-";
     }
+    
+    // Ensure address fields are set for PDF
+    piData.billing_address = piData.billing_address || piData.address || "";
+    piData.shipping_address = piData.shipping_address || piData.delivery_address || piData.address || "";
+    piData.delivery_address = piData.delivery_address || piData.address || "";
+    
     return generateExactPIPdf(res, piData);
   } catch (err) {
     console.error("Download PI Error:", err);
@@ -765,7 +785,15 @@ exports.revisitPI = async (req, res) => {
 
   try {
     const { id } = req.params;
-    const { items } = req.body;
+    const { items, billing_address, shipping_address, delivery_address } = req.body;
+
+    console.log("REVISIT PI REQUEST:", {
+      id,
+      billing_address,
+      shipping_address,
+      delivery_address,
+      hasItems: Array.isArray(items)
+    });
 
     if (!Array.isArray(items) || items.length === 0)
       throw new Error("No items provided for revisit");
@@ -840,8 +868,9 @@ exports.revisitPI = async (req, res) => {
       if (!item.product_id || !item.qty || item.qty <= 0)
         throw new Error("Invalid item payload");
 
-      const rate = rateMap[item.product_id];
-      if (rate === undefined || rate === null)
+      // Use manual rate if provided, otherwise use existing rate
+      const rate = item.rate !== undefined ? Number(item.rate) : rateMap[item.product_id];
+      if (rate === undefined || rate === null || isNaN(rate))
         throw new Error(
           `Rate not found for product ${item.product_id}. Cannot revisit PI`,
         );
@@ -910,6 +939,11 @@ exports.revisitPI = async (req, res) => {
         { transaction: t },
       );
     }
+
+    // Update address fields if provided
+    if (billing_address !== undefined) pi.billing_address = billing_address;
+    if (shipping_address !== undefined) pi.shipping_address = shipping_address;
+    if (delivery_address !== undefined) pi.delivery_address = delivery_address;
 
     pi.updatedAt = new Date();
     await pi.save({ transaction: t });
@@ -1456,10 +1490,21 @@ exports.adminApprovePI = async (req, res) => {
       transport_name,
       transport_payment_status,
       delivery_address,
+      billing_address,
+      shipping_address,
       receiver_courier_name,
       perforation_qty,
       perforation_payment_status,
     } = req.body;
+
+    console.log("ADMIN APPROVE PI REQUEST:", {
+      id,
+      delivery_address,
+      billing_address,
+      shipping_address,
+      transport_type_id,
+      transport_id
+    });
 
     const pi = await ProformaInvoice.findByPk(id, {
       include: [
@@ -1546,6 +1591,18 @@ exports.adminApprovePI = async (req, res) => {
       );
     }
 
+    // 🔹 Handle manual item prices if provided
+    if (req.body.manual_item_prices && typeof req.body.manual_item_prices === 'object') {
+      console.log(`Updating manual item prices:`, req.body.manual_item_prices);
+      for (const [itemId, manualPrice] of Object.entries(req.body.manual_item_prices)) {
+        const item = pi.items.find(item => item.id == itemId);
+        if (item) {
+          await item.update({ rate: Number(manualPrice) }, { transaction: t });
+          console.log(`Updated item ${itemId} rate to ${manualPrice}`);
+        }
+      }
+    }
+
     // 🔹 Update PI - Always save transport_amount and perforation_amount, regardless of payment status
     await pi.update(
       {
@@ -1555,6 +1612,8 @@ exports.adminApprovePI = async (req, res) => {
         transport_name,
         transport_payment_status,
         delivery_address,
+        billing_address,
+        shipping_address,
         receiver_courier_name,
         transport_amount: transportAmount,
         perforation_qty: perforation_qty || 0,

@@ -1,12 +1,12 @@
 module.exports = {
   COMPANIES: {
     MARVIN: {
-      name: "Marvin life style pvt limited",
-      address: "47, Wilson Garden, Hosur Main Road, Bengaluru, Karnataka 560027, India",
-      gstin: "29ABCDE1234F1Z5",
+      name: "Marvin Lifestyle India Pvt. Ltd. (Bangalore) 26-27",
+      address: "#45, Unit # 101,201,301, Sriven Rag Landmark, Wilson Garden, Near Brand Factory, Bangaluru-560027",
+      gstin: "29AAGCM7754A1ZD",
       state: "Karnataka",
-      stateCode: "560027",
-      email: "info@marvinleather.com", // Update with actual email
+      stateCode: "29",
+      email: "accounts@marvinlifestyle.com",
       bankName: "Bank of India OD Account",
       accountNo: "840930110000045",
       ifsc: "BKID0008409",
@@ -29,11 +29,11 @@ module.exports = {
   },
   // Legacy support - default to MARVIN
   COMPANY: {
-    name: "marvin life style pvt limited",
-    address: "47, Wilson Garden, Hosur Main Road, Bengaluru, Karnataka 560027, India",
-    gstin: "29ABCDE1234F1Z5",
+    name: "Marvin Lifestyle India Pvt. Ltd. (Bangalore) 26-27",
+    address: "#45, Unit # 101,201,301, Sriven Rag Landmark, Wilson Garden, Near Brand Factory, Bangaluru-560027",
+    gstin: "29AAGCM7754A1ZD",
     state: "Karnataka",
-    stateCode: "560027",
+    stateCode: "29",
   },
   DEFAULT_RATE: 250,
   // GST rates: local (intra-state) split into CGST+SGST, inter-state uses IGST

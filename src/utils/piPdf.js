@@ -25,11 +25,25 @@ function amountInWords(num) {
     return w(Math.floor(n / 10000000)) + " Crore" + (n % 10000000 ? " " + w(n % 10000000) : "");
   };
 
-  return `INR ${w(Math.round(num))} Only`;
+  const n = Math.abs(num);
+  const integerPart = Math.floor(n);
+  const fractionPart = Math.round((n - integerPart) * 100);
+  let words = w(integerPart) ? w(integerPart) + " Rupees" : "";
+  if (fractionPart) {
+    words += (words ? " and " : "") + w(fractionPart) + " Paise";
+  }
+
+  return `Rs. ${words} Only`;
 }
 
 module.exports = function generateExactPIPdf(res, pi) {
-  console.log("PI",pi)
+  console.log("PI DATA FOR PDF:", {
+    id: pi.id,
+    shipping_address: pi.shipping_address,
+    billing_address: pi.billing_address,
+    delivery_address: pi.delivery_address,
+    address: pi.address
+  });
   const doc = new PDFDocument({
     size: "A4",
     margin: 40
@@ -40,253 +54,291 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   doc.pipe(res);
 
+  /* ---------- COMPLETE PAGE BORDER (drawn first, behind content) ---------- */
+  const pageLeft = doc.page.margins.left;
+  const pageRight = doc.page.width - doc.page.margins.right;
+  const contentWidth = pageRight - pageLeft;
+  const borderTop = doc.page.margins.top;
+  const borderLeft = pageLeft;
+  const borderWidth = contentWidth;
+  const borderHeight = doc.page.height - (doc.page.margins.top + doc.page.margins.bottom);
+  doc.lineWidth(0.5).rect(borderLeft - 5, borderTop - 5, borderWidth + 10, borderHeight + 10).stroke();
+
   const isWestern = pi.company_name === COMPANY.WESTERN;
   const company = isWestern
     ? PI_CONST.COMPANIES.WESTERN
     : PI_CONST.COMPANIES.MARVIN;
 
+  const sameState =
+    pi.state?.toLowerCase().trim() ===
+    company.state?.toLowerCase().trim();
+
   let y = 40;
 
-  /* ---------- HEADER ---------- */
+  /* ---------- HEADER (table-based) ---------- */
+  // pageLeft, pageRight, contentWidth already defined in border section above
 
-  const logoPath = path.resolve(__dirname, "../../assets/logo.png");
+  const headerHeight = 170;
+  const colAWidth = contentWidth * 0.4;
+  const colBWidth = contentWidth * 0.3;
+  const colCWidth = contentWidth * 0.3;
+  const colAX = pageLeft;
+  const colBX = colAX + colAWidth;
+  const colCX = colBX + colBWidth;
+
+  doc.lineWidth(1).rect(pageLeft, y, contentWidth, headerHeight).stroke();
+  doc.moveTo(colBX, y).lineTo(colBX, y + headerHeight).stroke();
+  doc.moveTo(colCX, y).lineTo(colCX, y + headerHeight).stroke();
+
+  // Company block
+  const logoPath = path.resolve(__dirname, `../../assets/${isWestern ? 'western-logo.png' : 'marvin-logo.png'}`);
+  const logoWidth = 60;
+  const logoX = colAX + 4;
+  const textX = logoX + logoWidth + 8;
+  const textWidth = colAWidth - logoWidth - 12;
+  
   if (fs.existsSync(logoPath)) {
-    doc.image(logoPath, 40, y, { width: 100 });
-    y += 90; // push content further down to avoid overlap with text
+    doc.image(logoPath, logoX, y + 4, { width: logoWidth, height: 80 });
   }
 
-  // invoice title
-  doc
-    .font("Helvetica-Bold")
-    .fontSize(14)
-    .text("Proforma Invoice", 400, y);
+  doc.font("Helvetica-Bold").fontSize(8).text(company.name.toUpperCase(), textX, y + 4, { width: textWidth });
+  doc.font("Helvetica").fontSize(7).text(company.address, textX, y + 25, { width: textWidth, align: "left" });
+  doc.text(`GSTIN/UIN: ${company.gstin}`, textX, y + 52, { width: textWidth });
+  doc.text(`State Name: ${company.state}, Code: ${company.stateCode}`, textX, y + 62, { width: textWidth });
+  doc.text(`E-Mail: ${company.email}`, textX, y + 72, { width: textWidth });
 
-  y += 40;
-
-  /* ---------- COMPANY ---------- */
-
-  doc
-    .font("Helvetica-Bold")
-    .fontSize(10)
-    .text(company.name, 40, y);
-
-  doc
-    .font("Helvetica")
-    .fontSize(9)
-    .text(company.address, 40, y + 15, { width: 250 });
-
-  doc.text(`GSTIN: ${company.gstin}`, 40, y + 40);
-  doc.text(`State: ${company.state} (${company.stateCode})`, 40, y + 55);
-
-  /* ---------- INVOICE INFO ---------- */
-
+  // Middle invoice info
   const invoiceDate = new Date(pi.createdAt || new Date());
   const invoiceYear = invoiceDate.getFullYear();
   const fyStart = String(invoiceYear % 100).padStart(2, "0");
   const fyEnd = String((invoiceYear + 1) % 100).padStart(2, "0");
   const financialYear = `${fyStart}${fyEnd}`;
-  const invoiceIdNumber = Number(pi.id)-105;
-  doc
-    .font("Helvetica")
-    .fontSize(10)
-    .text("Invoice No", 350, y);
+  const invoiceIdNumber = Number(pi.id) - 105;
+  const invoiceNo = `${isWestern ? "WC/PI/2526/" : "MLM/PI/"}${financialYear}/${invoiceIdNumber}`;
 
-  doc
-    .font("Helvetica-Bold")
-    .text(
-      `${isWestern ? "WC/PI/2526/" : "MLM/PI/"}${financialYear}/${invoiceIdNumber}`,
-      430,
-      y,
-    );
+  const invoiceFields = [
+    ["Invoice No", invoiceNo],
+  ].filter(([, value]) => value && String(value).trim() !== "-");
 
-  doc
-    .font("Helvetica")
-    .text("Date", 350, y + 20);
-
-  doc
-    .font("Helvetica-Bold")
-    .text(formatDate(pi.createdAt), 430, y + 20);
-
-  y += 100;
-
-  console.log("📄 PDF Generation - PI Addresses:", {
-    pi_id: pi.id,
-    billing_address: pi.billing_address,
-    shipping_address: pi.shipping_address,
-    address: pi.address,
+  doc.font("Helvetica-Bold").fontSize(9).text("Invoice Info", colBX + 4, y + 4);
+  let invY = y + 18;
+  invoiceFields.forEach(([label, value]) => {
+    doc.font("Helvetica").fontSize(8).text(`${label}:`, colBX + 4, invY, { continued: true });
+    doc.font("Helvetica-Bold").text(` ${value}`);
+    invY += 11;
   });
 
-  /* ---------- BILLING ADDRESS ---------- */
+  // Add labels below Invoice No in the box
+  doc.font("Helvetica").fontSize(7);
+  doc.text("Delivery Note", colBX + 4, invY);
+  invY += 10;
+  doc.text("Reference No", colBX + 4, invY);
+  invY += 10;
+  doc.text("Buyer's Order No", colBX + 4, invY);
+  invY += 10;
+  doc.text("Dispatch Doc No", colBX + 4, invY);
+  invY += 10;
+  doc.text("Dispatched Through", colBX + 4, invY);
 
-  doc
-    .font("Helvetica-Bold")
-    .fontSize(11)
-    .text("BILL TO:", 40, y);
+  // Right dates/terms
+  const rightFields = [
+    ["Dated", formatDate(pi.createdAt)],
+  ].filter(([, value]) => value && String(value).trim() !== "-");
 
-  doc
-    .font("Helvetica-Bold")
-    .fontSize(10)
-    .text(pi.customer_name, 40, y + 18);
-
-  doc
-    .font("Helvetica")
-    .fontSize(9)
-    .text(pi.billing_address || pi.address, 40, y + 35, { width: 260 });
-
-  doc
-    .font("Helvetica")
-    .fontSize(9)
-    .text(`GSTIN: ${pi.gst_number || "-"}`, 40, y + 60);
-  
-  doc.text(`State: ${pi.state}`, 40, y + 73);
-  doc.text(`Contact: ${pi.contact || "-"}`, 40, y + 86);
-
-  /* ---------- SHIPPING ADDRESS (if different) ---------- */
-  const billAddr = (pi.billing_address || pi.address || "").trim();
-  const shipAddr = (pi.shipping_address || "").trim();
-  
-  console.log("📍 Address Comparison:", {
-    billAddr: `"${billAddr}"`,
-    shipAddr: `"${shipAddr}"`,
-    isShipAddrEmpty: !shipAddr,
-    isDifferent: shipAddr !== billAddr,
-    willShowShipTo: shipAddr && shipAddr !== billAddr,
+  doc.font("Helvetica-Bold").fontSize(9).text("Dates/Terms", colCX + 4, y + 4);
+  let rightY = y + 18;
+  rightFields.forEach(([label, value]) => {
+    doc.font("Helvetica").fontSize(8).text(`${label}:`, colCX + 4, rightY, { continued: true });
+    doc.font("Helvetica-Bold").text(` ${value}`);
+    rightY += 11;
   });
-  
-  if (shipAddr && shipAddr !== billAddr) {
-    console.log("✅ Adding SHIP TO section");
-    
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(11)
-      .text("SHIP TO:", 350, y);
-    
-    doc
-      .font("Helvetica-Bold")
-      .fontSize(10)
-      .text(pi.customer_name, 350, y + 18);
-    
-    doc
-      .font("Helvetica")
-      .fontSize(9)
-      .text(shipAddr, 350, y + 35, { width: 190 });
-  } else {
-    console.log("❌ SHIP TO section NOT added - Condition not met");
-  }
 
-  y += 120;
+  // Add labels below Dated in the box
+  doc.font("Helvetica").fontSize(7);
+  doc.text("Mode of Payment", colCX + 4, rightY);
+  rightY += 10;
+  doc.text("Other References", colCX + 4, rightY);
+  rightY += 10;
+  doc.text("Dated", colCX + 4, rightY);
+  rightY += 10;
+  doc.text("Delivery Note Date", colCX + 4, rightY);
+  rightY += 10;
+  doc.text("Destination", colCX + 4, rightY);
 
-  /* ---------- TABLE HEADER ---------- */
+  y += headerHeight;
 
-  const cols = [40, 70, 260, 320, 380, 430, 480, 520];
+  const storeAddress = (addr) => (addr || "").replace(/\n/g, ", ");
+
+  /* ---------- PARTY DETAILS ---------- */
+  const partySectionHeight = 200;
+  doc.lineWidth(1).rect(pageLeft, y, contentWidth, partySectionHeight).stroke();
+  doc.moveTo(pageLeft, y + partySectionHeight / 2).lineTo(pageRight, y + partySectionHeight / 2).stroke();
+
+  const pY = y + 6;
+  const partyLineHeight = 14;
+
+  doc.font("Helvetica-Bold").fontSize(9).text("Consignee (Ship to)", pageLeft + 4, pY);
+  doc.font("Helvetica").fontSize(8).text(pi.customer_name, pageLeft + 4, pY + partyLineHeight);
+  doc.text(storeAddress(pi.shipping_address || pi.delivery_address || pi.billing_address), pageLeft + 4, pY + 2 * partyLineHeight, { width: contentWidth - 8 });
+  doc.text(`GSTIN/UIN: ${pi.gst_number || "-"}`, pageLeft + 4, pY + 3.5 * partyLineHeight);
+  doc.text(`State: ${pi.state || "-"}`, pageLeft + 4, pY + 4.5 * partyLineHeight);
+  doc.text(`Contact: ${pi.contact || "-"}`, pageLeft + 4, pY + 5.5 * partyLineHeight);
+
+  doc.font("Helvetica-Bold").fontSize(9).text("Buyer (Bill to)", pageLeft + 4, y + partySectionHeight / 2 + 6);
+  doc.font("Helvetica").fontSize(8).text(pi.customer_name, pageLeft + 4, y + partySectionHeight / 2 + 6 + partyLineHeight);
+  doc.text(storeAddress(pi.billing_address || pi.delivery_address), pageLeft + 4, y + partySectionHeight / 2 + 6 + 2 * partyLineHeight, { width: contentWidth - 8 });
+  doc.text(`GSTIN/UIN: ${pi.gst_number || "-"}`, pageLeft + 4, y + partySectionHeight / 2 + 6 + 3.5 * partyLineHeight);
+  doc.text(`State: ${pi.state || "-"}`, pageLeft + 4, y + partySectionHeight / 2 + 6 + 4.5 * partyLineHeight);
+  doc.text(`Contact: ${pi.contact || "-"}`, pageLeft + 4, y + partySectionHeight / 2 + 6 + 5.5 * partyLineHeight);
+
+  y += partySectionHeight;
+
+  /* ---------- ITEMS TABLE ---------- */
+  const colWidths = {
+    sl: Math.floor(contentWidth * 0.05),
+    desc: Math.floor(contentWidth * 0.35),
+    hsn: Math.floor(contentWidth * 0.1),
+    qty: Math.floor(contentWidth * 0.1),
+    rate: Math.floor(contentWidth * 0.1),
+    per: Math.floor(contentWidth * 0.05),
+    disc: Math.floor(contentWidth * 0.05),
+    amt: Math.floor(contentWidth * 0.2),
+  };
+
+  const xSel = pageLeft;
+  const xDesc = xSel + colWidths.sl;
+  const xHsn = xDesc + colWidths.desc;
+  const xQty = xHsn + colWidths.hsn;
+  const xRate = xQty + colWidths.qty;
+  const xPer = xRate + colWidths.rate;
+  const xDisc = xPer + colWidths.per;
+  const xAmt = xDisc + colWidths.disc;
+
+  const tableTop = y;
+  const rowHeight = 18;
+
+  doc.lineWidth(1).rect(pageLeft, tableTop, contentWidth, rowHeight).stroke();
+  doc.moveTo(xDesc, tableTop).lineTo(xDesc, tableTop + rowHeight).stroke();
+  doc.moveTo(xHsn, tableTop).lineTo(xHsn, tableTop + rowHeight).stroke();
+  doc.moveTo(xQty, tableTop).lineTo(xQty, tableTop + rowHeight).stroke();
+  doc.moveTo(xRate, tableTop).lineTo(xRate, tableTop + rowHeight).stroke();
+  doc.moveTo(xPer, tableTop).lineTo(xPer, tableTop + rowHeight).stroke();
+  doc.moveTo(xDisc, tableTop).lineTo(xDisc, tableTop + rowHeight).stroke();
 
   doc.font("Helvetica-Bold").fontSize(9);
+  doc.text("Sl No", xSel + 2, y + 4);
+  doc.text("Description", xDesc + 2, y + 4);
+  doc.text("HSN/SAC", xHsn + 2, y + 4);
+  doc.text("Quantity", xQty + 2, y + 4);
+  doc.text("Rate", xRate + 2, y + 4);
+  doc.text("per", xPer + 2, y + 4);
+  doc.text("Disc %", xDisc + 2, y + 4);
+  doc.text("Amount", xAmt + 2, y + 4, { width: colWidths.amt - 4, align: "right" });
 
-  doc.text("#", cols[0], y);
-  doc.text("Description", cols[1], y);
-  doc.text("HSN", cols[2], y);
-  doc.text("Qty", cols[3], y);
-  doc.text("Rate", cols[4], y);
-  doc.text("Per", cols[5], y);
-  doc.text("Disc", cols[6], y);
-  doc.text("Amount", cols[7], y, { align: "right" });
-
-  y += 15;
-
-  /* ---------- ITEMS ---------- */
+  y += rowHeight;
 
   let subtotal = 0;
+
+  const transportCharge = Number(pi.transport_amount || 0);
+  const transportGstPercent = 5;
+  const transportGst = transportCharge > 0 ? (transportCharge * transportGstPercent / 100) : 0;
 
   doc.font("Helvetica").fontSize(9);
 
   pi.items.forEach((item, i) => {
-
-    const rate = item.rate;
-    const qty = item.qty;
+    const rate = item.rate || 0;
+    const qty = item.qty || 0;
     const amount = rate * qty;
-
     subtotal += amount;
 
-    doc.text(i + 1, cols[0], y);
+    doc.lineWidth(0.5).rect(pageLeft, y, contentWidth, rowHeight).stroke();
+    doc.moveTo(xDesc, y).lineTo(xDesc, y + rowHeight).stroke();
+    doc.moveTo(xHsn, y).lineTo(xHsn, y + rowHeight).stroke();
+    doc.moveTo(xQty, y).lineTo(xQty, y + rowHeight).stroke();
+    doc.moveTo(xRate, y).lineTo(xRate, y + rowHeight).stroke();
+    doc.moveTo(xPer, y).lineTo(xPer, y + rowHeight).stroke();
+    doc.moveTo(xDisc, y).lineTo(xDisc, y + rowHeight).stroke();
 
-    doc
-      .font("Helvetica-Bold")
-      .text(`${item.product.leather_code} ${item.product.color}`, cols[1], y);
+    doc.font("Helvetica").text(String(i + 1), xSel + 2, y + 3);
+    doc.font("Helvetica-Bold").text(`${item.product?.leather_code || ""} ${item.product?.color || ""}`, xDesc + 2, y + 3, { width: colWidths.desc - 4 });
+    doc.font("Helvetica").text(item.product?.hsn_code || "41079100", xHsn + 2, y + 3);
+    doc.text(`${qty.toFixed(2)} SQF`, xQty + 2, y + 3);
+    doc.text(rate.toFixed(2), xRate + 2, y + 3);
+    doc.text("SQF", xPer + 2, y + 3);
+    doc.text("-", xDisc + 2, y + 3);
+    doc.text(amount.toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
 
-    doc
-      .font("Helvetica")
-      .text(item.product.hsn_code || "4107", cols[2], y);
+    y += rowHeight;
 
-    doc.text(qty.toFixed(2), cols[3], y);
-    doc.text(rate.toFixed(2), cols[4], y);
-    doc.text("SQF", cols[5], y);
-    doc.text("-", cols[6], y);
+    if (i === 0) {
+      const extras = [
+        ["Forwarding & Handling Charges", pi.forwarding_charges],
+        ["Less: Rounded Off Balance", pi.round_off_balance],
+      ].filter(([, value]) => value && Number(value) !== 0);
 
-    doc.text(amount.toFixed(2), cols[7], y, {
-      width: 60,
-      align: "right"
-    });
-
-    y += 18;
-
+      extras.forEach(([label, value]) => {
+        doc.font("Helvetica").fontSize(8).text(label, xDesc + 4, y + 2, { width: colWidths.desc - 6 });
+        doc.text(Number(value).toFixed(2), xAmt + 2, y + 2, { width: colWidths.amt - 4, align: "right" });
+        y += 14;
+      });
+    }
   });
 
-  /* ---------- TAX ---------- */
+  // bottom totals row for items
+  doc.lineWidth(1).rect(pageLeft, y, contentWidth, rowHeight).stroke();
+  doc.moveTo(xDesc, y).lineTo(xDesc, y + rowHeight).stroke();
+  doc.moveTo(xHsn, y).lineTo(xHsn, y + rowHeight).stroke();
+  doc.moveTo(xQty, y).lineTo(xQty, y + rowHeight).stroke();
+  doc.moveTo(xRate, y).lineTo(xRate, y + rowHeight).stroke();
+  doc.moveTo(xPer, y).lineTo(xPer, y + rowHeight).stroke();
+  doc.moveTo(xDisc, y).lineTo(xDisc, y + rowHeight).stroke();
 
-  const sameState =
-    pi.state?.toLowerCase().trim() ===
-    company.state?.toLowerCase().trim();
+  doc.font("Helvetica-Bold").fontSize(9).text("Total", xDesc + 2, y + 3);
+  doc.font("Helvetica-Bold").text(`${pi.total_qty?.toFixed(2) || (pi.items[0]?.qty || 0).toFixed(2)} SQF`, xQty + 2, y + 3, { width: colWidths.qty, align: "center" });
+  doc.text((subtotal + transportCharge).toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
 
-  const cgst = sameState ? subtotal * PI_CONST.CGST / 100 : 0;
-  const sgst = sameState ? subtotal * PI_CONST.SGST / 100 : 0;
-  const igst = sameState ? 0 : subtotal * PI_CONST.IGST / 100;
+  y += rowHeight;
 
-  let total = subtotal + cgst + sgst + igst;
+  const taxableValue = subtotal + transportCharge;
 
-  let transportCharge = 0;
-  let transportGst = 0;
+  const cgstItems = sameState ? taxableValue * PI_CONST.CGST / 100 : 0;
+  const sgstItems = sameState ? taxableValue * PI_CONST.SGST / 100 : 0;
+  const igstItems = sameState ? 0 : taxableValue * PI_CONST.IGST / 100;
 
-  // Transport GST is always 5% as per user requirement.
-  const transportGstPercent = 5;
+  const totalItemTax = cgstItems + sgstItems + igstItems;
+  const combinedTaxAmount = totalItemTax;
 
-  if (pi.transport_amount > 0) {
-    transportCharge = pi.transport_amount;
-    transportGst = transportCharge * transportGstPercent / 100;
-    total += transportCharge + transportGst;
-  }
+  const total = taxableValue + combinedTaxAmount;
 
   const roundedTotal = Math.round(total);
   const roundOff = Number((roundedTotal - total).toFixed(2));
   const finalTotal = Number((total + roundOff).toFixed(2));
 
-  y += 20;
-
   doc.font("Helvetica");
 
-  if (transportCharge > 0) {
-    console.log(transportCharge, transportGst);
-  doc.text("Transport", 400, y);
-  doc.text(Number(transportCharge.toFixed(2))+Number(transportGst.toFixed(2)  ), 520, y, { align: "right" });
-  // y += 15;
+  y += 10;  // Move Forwarding Charges down a bit
 
-  // doc.text(`Transport GST (${transportGstPercent}%)`, 400, y);
-  // doc.text(transportGst.toFixed(2), 520, y, { align: "right" });
-  y += 15;
-}
+  if (transportCharge > 0) {
+    doc.text("Forwarding Charges", 400, y);
+    doc.text(`${transportCharge.toFixed(2)}`, 520, y, { align: "right" });
+    y += 15;
+  }
 
 if (sameState) {
   doc.text(`CGST ${PI_CONST.CGST}%`, 400, y);
-  doc.text(cgst.toFixed(2), 520, y, { align: "right" });
+  doc.text(cgstItems.toFixed(2), 520, y, { align: "right" });
   y += 15;
 
   doc.text(`SGST ${PI_CONST.SGST}%`, 400, y);
-  doc.text(sgst.toFixed(2), 520, y, { align: "right" });
+  doc.text(sgstItems.toFixed(2), 520, y, { align: "right" });
   y += 15;
 } else {
   doc.text(`IGST ${PI_CONST.IGST}%`, 400, y);
-  doc.text(igst.toFixed(2), 520, y, { align: "right" });
+  doc.text(igstItems.toFixed(2), 520, y, { align: "right" });
   y += 15;
 }
+
+// forwarding GST is included in overall taxable value, so no separate line here
 
 y += 5;
 
@@ -307,47 +359,86 @@ y += 5;
 
   y += 35;
 
-  /* ---------- AMOUNT WORDS ---------- */
+  /* ---------- TAX SUMMARY TABLE ---------- */
+  
+  const hsnCode = pi.items[0]?.product?.hsn_code || "41079100";
+  const taxRate = sameState ? PI_CONST.CGST + PI_CONST.SGST : PI_CONST.IGST;
+  const taxAmount = sameState ? (cgstItems + sgstItems) : igstItems;
+  const displayTaxableValue = taxableValue;  // include forwarding in taxable base as requested
 
-  doc
-    .font("Helvetica")
-    .fontSize(9)
-    .text("Amount in Words", 40, y);
+  const taxTableX = pageLeft;
+  const taxTableY = y;
+  const taxTableW = contentWidth;
+  const taxCol1 = taxTableX;
+  const taxCol2 = taxCol1 + (taxTableW * 0.25);
+  const taxCol3 = taxCol2 + (taxTableW * 0.2);
+  const taxCol4 = taxCol3 + (taxTableW * 0.2);
+  const taxCol5 = taxCol4 + (taxTableW * 0.2);
+
+  const taxRowHeight = 18;
+
+  doc.lineWidth(1).rect(taxTableX, taxTableY, taxTableW, taxRowHeight * 2).stroke();
+  doc.moveTo(taxCol2, taxTableY).lineTo(taxCol2, taxTableY + taxRowHeight * 2).stroke();
+  doc.moveTo(taxCol3, taxTableY).lineTo(taxCol3, taxTableY + taxRowHeight * 2).stroke();
+  doc.moveTo(taxCol4, taxTableY).lineTo(taxCol4, taxTableY + taxRowHeight * 2).stroke();
+  doc.moveTo(taxCol5, taxTableY).lineTo(taxCol5, taxTableY + taxRowHeight * 2).stroke();
+
+  doc.font("Helvetica-Bold").fontSize(9)
+    .text("HSN/SAC", taxCol1 + 3, taxTableY + 4)
+    .text("Taxable Value", taxCol2 + 3, taxTableY + 4)
+    .text("Rate", taxCol3 + 3, taxTableY + 4)
+    .text("IGST Amount", taxCol4 + 3, taxTableY + 4)
+    .text("Total Tax Amount", taxCol5 + 3, taxTableY + 4);
+
+  doc.font("Helvetica").fontSize(9)
+    .text(hsnCode, taxCol1 + 3, taxTableY + taxRowHeight + 4)
+    .text(displayTaxableValue.toFixed(2), taxCol2 + 3, taxTableY + taxRowHeight + 4)
+    .text(`${taxRate}%`, taxCol3 + 3, taxTableY + taxRowHeight + 4)
+    .text(taxAmount.toFixed(2), taxCol4 + 3, taxTableY + taxRowHeight + 4)
+    .text(taxAmount.toFixed(2), taxCol5 + 3, taxTableY + taxRowHeight + 4);
+
+  y += taxRowHeight * 2 + 10;
+
+  /* ---------- AMOUNT IN WORDS ---------- */
+  doc.font("Helvetica").fontSize(9).text("Amount Chargeable (in words)", pageLeft, y);
 
   doc
     .font("Helvetica-Bold")
-    .text(amountInWords(finalTotal), 40, y + 15);
+    .text(amountInWords(finalTotal), pageLeft, y + 12);
 
-  y += 70;
+  y += 35;
 
-  /* ---------- BANK ---------- */
+  /* ---------- DECLARATION ---------- */
+  doc.font("Helvetica-Bold").fontSize(9).text("Declaration:", pageLeft, y);
+  y += 12;
+  doc.font("Helvetica").fontSize(8);
+  doc.text("Actual quantity delivered may vary by +/- 25 Sq. Ft. or by upto 10% for Bulk Quantities.", pageLeft, y);
+  y += 10;
+  doc.text("Being a natural product, 1 or 2 holes on the hides are inevitable.", pageLeft, y);
+  y += 10;
+  doc.text("Colour may vary by 2-3% from lot to lot.", pageLeft, y);
+  y += 10;
+  doc.text("Goods once sold cannot be returned under any circumstances.", pageLeft, y);
+  y += 10;
+  doc.text("Freight & Forwarding Charges will be invoiced at actuals.", pageLeft, y);
+  y += 20;
 
-  doc
-    .font("Helvetica-Bold")
-    .text("Bank Details", 40, y);
+  /* ---------- FOOTER (BANK + SIGNATURE) ---------- */
+  const footerBoxHeight = 80;
+  doc.lineWidth(1).rect(pageLeft, y, contentWidth, footerBoxHeight).stroke();
+  doc.moveTo(pageLeft + contentWidth * 0.6, y).lineTo(pageLeft + contentWidth * 0.6, y + footerBoxHeight).stroke();
 
-  doc
-    .font("Helvetica")
-    .text(`Bank: ${company.bankName}`, 40, y + 15);
+  // Left: Bank Details
+  doc.font("Helvetica-Bold").fontSize(9).text("Bank Details", pageLeft + 4, y + 4);
+  doc.font("Helvetica").fontSize(8).text(`Bank: ${company.bankName}`, pageLeft + 4, y + 16);
+  doc.text(`Account: ${company.accountNo}`, pageLeft + 4, y + 26);
+  doc.text(`Branch: ${company.branch}`, pageLeft + 4, y + 36);
+  doc.text(`IFSC: ${company.ifsc}`, pageLeft + 4, y + 46);
 
-  doc.text(`Account: ${company.accountNo}`, 40, y + 30);
-
-  doc.text(
-    `Branch: ${company.branch}  |  IFSC: ${company.ifsc}`,
-    40,
-    y + 45
-  );
-
-  /* ---------- SIGN ---------- */
-
-  doc
-    .font("Helvetica-Bold")
-    .text(company.signature, 400, y);
-
-  doc
-    .font("Helvetica")
-    .fontSize(9)
-    .text("Authorised Signatory", 400, y + 60);
+  // Right: Signature
+  const rightColX = pageLeft + Math.floor(contentWidth * 0.6) + 4;
+  doc.font("Helvetica-Bold").fontSize(9).text(company.signature, rightColX, y + 30, { align: "right", width: Math.floor(contentWidth * 0.4) - 8 });
+  doc.font("Helvetica").fontSize(8).text("Authorised Signatory", rightColX, y + 60, { align: "right", width: Math.floor(contentWidth * 0.4) - 8 });
 
   doc
     .fontSize(8)
