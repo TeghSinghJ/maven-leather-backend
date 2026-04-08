@@ -49,7 +49,6 @@ module.exports = function generateExactPIPdf(res, pi) {
   const isVitton = pi.items.some(item => 
     item.product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton')
   );
-  console.log('isVitton:', isVitton, 'items:', pi.items.map(i => i.product?.series?.subCollection?.mainCollection?.name));
 
   const doc = new PDFDocument({
     size: "A4",
@@ -269,9 +268,9 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc.font("Helvetica").text(String(i + 1), xSel + 2, y + 3);
     doc.font("Helvetica-Bold").text(`${item.product?.leather_code || ""} ${item.product?.color || ""}`, xDesc + 2, y + 3, { width: colWidths.desc - 4 });
     doc.font("Helvetica").text(isVitton ? "56039400" : (item.product?.hsn_code || "41079100"), xHsn + 2, y + 3);
-    doc.text(`${qty.toFixed(2)} SQF`, xQty + 2, y + 3);
+    doc.text(`${qty.toFixed(2)} ${isVitton ? "SQM" : "SQF"}`, xQty + 2, y + 3);
     doc.text(rate.toFixed(2), xRate + 2, y + 3);
-    doc.text("SQF", xPer + 2, y + 3);
+    doc.text(isVitton ? "SQM" : "SQF", xPer + 2, y + 3);
     doc.text("-", xDisc + 2, y + 3);
     doc.text(amount.toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
 
@@ -301,7 +300,7 @@ module.exports = function generateExactPIPdf(res, pi) {
   doc.moveTo(xDisc, y).lineTo(xDisc, y + rowHeight).stroke();
 
   doc.font("Helvetica-Bold").fontSize(9).text("Total", xDesc + 2, y + 3);
-  doc.font("Helvetica-Bold").text(`${pi.total_qty?.toFixed(2) || (pi.items[0]?.qty || 0).toFixed(2)} SQF`, xQty + 2, y + 3, { width: colWidths.qty, align: "center" });
+  doc.font("Helvetica-Bold").text(`${pi.total_qty?.toFixed(2) || (pi.items[0]?.qty || 0).toFixed(2)} ${isVitton ? "SQM" : "SQF"}`, xQty + 2, y + 3, { width: colWidths.qty, align: "center" });
   doc.text((subtotal + transportCharge).toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
 
   y += rowHeight;
