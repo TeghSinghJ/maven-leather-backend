@@ -44,6 +44,13 @@ module.exports = function generateExactPIPdf(res, pi) {
     delivery_address: pi.delivery_address,
     address: pi.address
   });
+
+  // Check if it's Vitton collection
+  const isVitton = pi.items.some(item => 
+    item.product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton')
+  );
+  console.log('isVitton:', isVitton, 'items:', pi.items.map(i => i.product?.series?.subCollection?.mainCollection?.name));
+
   const doc = new PDFDocument({
     size: "A4",
     margin: 40
@@ -261,7 +268,7 @@ module.exports = function generateExactPIPdf(res, pi) {
 
     doc.font("Helvetica").text(String(i + 1), xSel + 2, y + 3);
     doc.font("Helvetica-Bold").text(`${item.product?.leather_code || ""} ${item.product?.color || ""}`, xDesc + 2, y + 3, { width: colWidths.desc - 4 });
-    doc.font("Helvetica").text(item.product?.hsn_code || "41079100", xHsn + 2, y + 3);
+    doc.font("Helvetica").text(isVitton ? "56039400" : (item.product?.hsn_code || "41079100"), xHsn + 2, y + 3);
     doc.text(`${qty.toFixed(2)} SQF`, xQty + 2, y + 3);
     doc.text(rate.toFixed(2), xRate + 2, y + 3);
     doc.text("SQF", xPer + 2, y + 3);
@@ -361,7 +368,7 @@ y += 5;
 
   /* ---------- TAX SUMMARY TABLE ---------- */
   
-  const hsnCode = pi.items[0]?.product?.hsn_code || "41079100";
+  const hsnCode = isVitton ? "56039400" : (pi.items[0]?.product?.hsn_code || "41079100");
   const taxRate = sameState ? PI_CONST.CGST + PI_CONST.SGST : PI_CONST.IGST;
   const taxAmount = sameState ? (cgstItems + sgstItems) : igstItems;
   const displayTaxableValue = taxableValue;  // include forwarding in taxable base as requested

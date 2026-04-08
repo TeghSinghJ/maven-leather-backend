@@ -535,10 +535,12 @@ exports.cancelPI = async (req, res) => {
           transaction: t,
           lock: t.LOCK.UPDATE,
         });
-        if (!hideStock)
-          throw new Error(
-            `HideStock not found while cancelling PI (hide_id=${b.hide_id})`,
+        if (!hideStock) {
+          console.warn(
+            `HideStock not found while cancelling PI (hide_id=${b.hide_id}), skipping hide stock restoration`,
           );
+          continue;
+        }
         hideStock.qty += b.qty;
         hideStock.status = "AVAILABLE";
         await hideStock.save({ transaction: t });
@@ -582,6 +584,25 @@ exports.downloadPI = async (req, res) => {
               model: LeatherProduct,
               as: "product",
               attributes: ["id", "leather_code", "color", "hsn_code"],
+              include: [
+                {
+                  model: CollectionSeries,
+                  as: "series",
+                  include: [
+                    {
+                      model: SubCollection,
+                      as: "subCollection",
+                      include: [
+                        {
+                          model: MainCollection,
+                          as: "mainCollection",
+                          attributes: ["name"],
+                        },
+                      ],
+                    },
+                  ],
+                },
+              ],
             },
           ],
         },
@@ -699,7 +720,87 @@ exports.suggestRevisit = async (req, res) => {
         throw new Error(`Rate not found for product ${item.product_id}`);
       }
 
-      // Fetch available hides for this product (do not lock, just read)
+      // Check if it's Vitton collection
+      const product = await LeatherProduct.findOne({
+        where: { id: item.product_id },
+        include: [
+          {
+            model: CollectionSeries,
+            as: "series",
+            include: [
+              {
+                model: SubCollection,
+                as: "subCollection",
+                include: [
+                  {
+                    model: MainCollection,
+                    as: "mainCollection",
+                    attributes: ["name"],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        transaction: t,
+      });
+
+      const isVitton = product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton');
+
+      if (isVitton) {
+        // For Vitton, use LeatherStock as a single roll
+        const stock = await LeatherStock.findOne({
+          where: { product_id: item.product_id },
+          attributes: ['available_qty'],
+          transaction: t,
+          lock: t.LOCK.SHARE,
+        });
+
+        if (!stock || stock.available_qty <= 0) {
+          suggestions.push({
+            product_id: item.product_id,
+            requested_qty: requestedQty,
+            allocated_qty: 0,
+            difference: -requestedQty,
+            difference_abs: Math.abs(requestedQty),
+            hides: [],
+            rate,
+            reason: "No available roll stock",
+          });
+          continue;
+        }
+
+        if (requestedQty !== stock.available_qty) {
+          suggestions.push({
+            product_id: item.product_id,
+            requested_qty: requestedQty,
+            allocated_qty: 0,
+            difference: -requestedQty,
+            difference_abs: Math.abs(requestedQty),
+            hides: [],
+            rate,
+            reason: `Available roll size is ${stock.available_qty} sqm, requested ${requestedQty} sqm. Cannot allocate partial roll.`,
+          });
+          continue;
+        }
+
+        // Exact match
+        suggestions.push({
+          product_id: item.product_id,
+          leather_code: item.leather_code,
+          requested_qty: requestedQty,
+          allocated_qty: requestedQty,
+          difference: 0,
+          difference_abs: 0,
+          within_tolerance: true,
+          hides: [{ hide_id: "roll", hide_qty: requestedQty }],
+          rate,
+          line_amount: Number((requestedQty * rate).toFixed(2)),
+        });
+        continue;
+      }
+
+      // Non-Vitton logic
       const hideStocks = await LeatherHideStock.findAll({
         where: {
           product_id: item.product_id,
@@ -875,6 +976,33 @@ exports.revisitPI = async (req, res) => {
           `Rate not found for product ${item.product_id}. Cannot revisit PI`,
         );
 
+      // Check if it's Vitton collection
+      const product = await LeatherProduct.findOne({
+        where: { id: item.product_id },
+        include: [
+          {
+            model: CollectionSeries,
+            as: "series",
+            include: [
+              {
+                model: SubCollection,
+                as: "subCollection",
+                include: [
+                  {
+                    model: MainCollection,
+                    as: "mainCollection",
+                    attributes: ["name"],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        transaction: t,
+      });
+
+      const isVitton = product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton');
+
       const leatherStock = await LeatherStock.findOne({
         where: { product_id: item.product_id },
         transaction: t,
@@ -884,6 +1012,34 @@ exports.revisitPI = async (req, res) => {
         throw new Error(
           `LeatherStock not found for product ${item.product_id}`,
         );
+
+      if (isVitton) {
+        // For Vitton, check exact roll match
+        if (leatherStock.available_qty !== item.qty) {
+          throw new Error(
+            `For Vitton collection, available roll size is ${leatherStock.available_qty} sqm, requested ${item.qty} sqm. Cannot allocate partial roll.`,
+          );
+        }
+
+        // Allocate the whole roll
+        leatherStock.available_qty -= item.qty;
+        leatherStock.reserved_qty += item.qty;
+        await leatherStock.save({ transaction: t });
+
+        await PIItem.create(
+          {
+            pi_id: pi.id,
+            product_id: item.product_id,
+            qty: item.qty,
+            rate,
+            batch_info: [{ hide_id: "roll", batch_no: "ROLL", qty: item.qty }],
+          },
+          { transaction: t },
+        );
+        continue;
+      }
+
+      // Non-Vitton logic
       if (leatherStock.available_qty < item.qty)
         throw new Error(
           `Insufficient available stock for product ${item.product_id}`,
