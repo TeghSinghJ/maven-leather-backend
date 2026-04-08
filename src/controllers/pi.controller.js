@@ -11,6 +11,7 @@ const {
   CollectionSeries,
   SubCollection,
   MainCollection,
+  Batch,
   sequelize,
 } = require("../../models");
 const { Op, Transaction } = require("sequelize");
@@ -38,14 +39,14 @@ const blockHideStockBatchItems = async (pi, transaction) => {
       if (!b.hide_id || b.hide_id === "roll") continue;
 
       const hideStock = await LeatherHideStock.findOne({
-        where: { hide_id: b.hide_id },
+        where: { hide_id: b.hide_id, batch_no: b.batch_no },
         transaction,
         lock: transaction.LOCK.UPDATE,
       });
 
       if (!hideStock) {
         console.warn(
-          `HideStock not found while blocking PI (hide_id=${b.hide_id}), skipping`,
+          `HideStock not found while blocking PI (hide_id=${b.hide_id}, batch_no=${b.batch_no}), skipping`,
         );
         continue;
       }
@@ -1703,6 +1704,9 @@ exports.adminApprovePI = async (req, res) => {
       receiver_courier_name,
       perforation_qty,
       perforation_payment_status,
+      transport_amount,
+      perforation_amount,
+      updated_items, // New: allow admin to update hide allocations
     } = req.body;
 
     console.log("ADMIN APPROVE PI REQUEST:", {
@@ -1711,7 +1715,8 @@ exports.adminApprovePI = async (req, res) => {
       billing_address,
       shipping_address,
       transport_type_id,
-      transport_id
+      transport_id,
+      hasUpdatedItems: !!updated_items
     });
 
     const pi = await ProformaInvoice.findByPk(id, {
@@ -1730,89 +1735,118 @@ exports.adminApprovePI = async (req, res) => {
       throw new Error("Only PENDING_APPROVAL PI can be approved");
     }
 
-    // 🔹 Determine transport amount
-    // Accept `transport_amount` from client (manual mode). If not provided, calculate automatically:
-    // - Prefer transport type's `base_price` (Rs per kg) if available and `weight_kg` provided
-    // - Fallback to default conversion 1 hide = 4.45 kg and PRICE_PER_KG = 30
-    let transportAmount = 0;
-    const KG_PER_HIDE = 4.45; // kg per hide (fallback)
-    const PRICE_PER_KG = 30; // Rs per kg (fallback)
-
-    if (req.body.transport_amount != null && req.body.transport_amount !== "") {
-      transportAmount = Number(req.body.transport_amount) || 0;
-      console.log(
-        `Using manual transport_amount from request: ${transportAmount}`,
-      );
-    } else if (transport_type_id && weight_kg) {
-      // Try to use transport type's base price
-      const transportType = await TransportType.findByPk(transport_type_id, {
+    // 🔹 Handle admin updates to hide allocations if provided
+    if (updated_items && Array.isArray(updated_items)) {
+      console.log("Admin updating hide allocations for PI items");
+      
+      // First, restore all previously allocated stock
+      const productIds = pi.items.map((i) => i.product_id);
+      const stocks = await LeatherStock.findAll({
+        where: { product_id: { [Op.in]: productIds } },
         transaction: t,
+        lock: t.LOCK.UPDATE,
       });
-      if (transportType && transportType.base_price) {
-        transportAmount = Number(weight_kg) * Number(transportType.base_price);
-        console.log(
-          `Auto transport: weight_kg ${weight_kg} × transportType.base_price ${transportType.base_price} = ${transportAmount}`,
-        );
-      } else {
-        // Fallback: if weight_kg provided use default PRICE_PER_KG, else compute from hides
-        if (weight_kg) {
-          transportAmount = Number(weight_kg) * PRICE_PER_KG;
-          console.log(
-            `Auto transport fallback using weight_kg ${weight_kg} × ${PRICE_PER_KG} = ${transportAmount}`,
-          );
-        } else {
-          // Count total hides and convert to kg
-          let totalHides = 0;
-          for (const item of pi.items) {
-            let batchInfo = item.batch_info || [];
-            if (typeof batchInfo === "string") {
-              try {
-                batchInfo = JSON.parse(batchInfo);
-              } catch (e) {
-                batchInfo = [];
-              }
-            }
-            if (Array.isArray(batchInfo)) totalHides += batchInfo.length;
+      const stockMap = {};
+      stocks.forEach((s) => (stockMap[s.product_id] = s));
+
+      for (const oldItem of pi.items) {
+        const stock = stockMap[oldItem.product_id];
+        if (stock) {
+          stock.available_qty += oldItem.qty;
+          stock.reserved_qty -= oldItem.qty;
+          if (stock.reserved_qty < 0) stock.reserved_qty = 0;
+          await stock.save({ transaction: t });
+        }
+
+        // Restore hide stock
+        let batches = [];
+        if (Array.isArray(oldItem.batch_info)) batches = oldItem.batch_info;
+        else if (typeof oldItem.batch_info === "string") {
+          try { batches = JSON.parse(oldItem.batch_info); } catch { batches = []; }
+        }
+
+        for (const b of batches) {
+          if (!b.hide_id) continue;
+          const hideStock = await LeatherHideStock.findOne({
+            where: { hide_id: b.hide_id },
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+          });
+          if (hideStock) {
+            hideStock.qty += b.qty;
+            hideStock.status = "AVAILABLE";
+            await hideStock.save({ transaction: t });
           }
-          transportAmount = totalHides * KG_PER_HIDE * PRICE_PER_KG;
-          console.log(
-            `Auto transport fallback from hides: ${totalHides} hides × ${KG_PER_HIDE} kg/hide × ${PRICE_PER_KG} Rs/kg = ${transportAmount}`,
-          );
         }
       }
-    }
 
-    // 🔹 Determine perforation amount
-    let perforationAmount = 0;
-    const PRICE_PER_SQFT_PERF = 50; // Rs per sqft for perforation
+      // Now apply the new allocations from admin
+      for (const update of updated_items) {
+        const { item_id, hides } = update;
+        const piItem = pi.items.find(item => item.id == item_id);
+        if (!piItem) continue;
 
-    if (req.body.perforation_amount != null && req.body.perforation_amount !== "") {
-      perforationAmount = Number(req.body.perforation_amount) || 0;
-      console.log(
-        `Using manual perforation_amount from request: ${perforationAmount}`,
-      );
-    } else if (perforation_qty != null && perforation_qty > 0) {
-      // Auto calculate based on perforation_qty (in sqft) entered by user
-      perforationAmount = Number(perforation_qty) * PRICE_PER_SQFT_PERF;
-      console.log(
-        `Auto perforation: perforation_qty ${perforation_qty} sqft × ${PRICE_PER_SQFT_PERF} Rs/sqft = ${perforationAmount}`,
-      );
-    }
+        if (!Array.isArray(hides) || hides.length === 0) {
+          throw new Error(`No hides provided for item ${item_id}`);
+        }
 
-    // 🔹 Handle manual item prices if provided
-    if (req.body.manual_item_prices && typeof req.body.manual_item_prices === 'object') {
-      console.log(`Updating manual item prices:`, req.body.manual_item_prices);
-      for (const [itemId, manualPrice] of Object.entries(req.body.manual_item_prices)) {
-        const item = pi.items.find(item => item.id == itemId);
-        if (item) {
-          await item.update({ rate: Number(manualPrice) }, { transaction: t });
-          console.log(`Updated item ${itemId} rate to ${manualPrice}`);
+        let allocatedQty = 0;
+        const batchInfo = [];
+
+        // Validate and allocate new hides
+        const hideIds = hides.map((h) => h.hide_id);
+        const hideRecords = await LeatherHideStock.findAll({
+          where: { 
+            hide_id: { [Op.in]: hideIds },
+            status: "AVAILABLE" 
+          },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+          order: [["id", "ASC"]],
+        });
+
+        if (hideRecords.length !== hides.length) {
+          throw new Error(`Some hides are no longer available for item ${item_id}`);
+        }
+
+        for (const h of hideRecords) {
+          const hideQty = hides.find((x) => x.hide_id === h.hide_id).hide_qty;
+          allocatedQty += hideQty;
+          batchInfo.push({
+            id: h.id,
+            hide_id: h.hide_id,
+            batch_no: h.batch_no,
+            qty: hideQty,
+            collection_series_id: h.collection_series_id,
+          });
+
+          h.qty -= hideQty;
+          h.status = "RESERVED";
+          await h.save({ transaction: t });
+        }
+
+        if (allocatedQty !== piItem.qty) {
+          throw new Error(`Allocated quantity (${allocatedQty}) does not match required quantity (${piItem.qty}) for item ${item_id}`);
+        }
+
+        // Update the PI item with new batch info
+        await piItem.update({ batch_info: batchInfo }, { transaction: t });
+
+        // Update product stock
+        const stock = stockMap[piItem.product_id];
+        if (stock) {
+          stock.available_qty -= allocatedQty;
+          stock.reserved_qty += allocatedQty;
+          await stock.save({ transaction: t });
         }
       }
-    }
 
-    // 🔹 Update PI - Always save transport_amount and perforation_amount, regardless of payment status
-    await blockHideStockBatchItems(pi, t);
+      // Block the allocated hides
+      await blockHideStockBatchItems(pi, t);
+    } else {
+      // No updates - proceed with original allocations
+      await blockHideStockBatchItems(pi, t);
+    }
 
     await pi.update(
       {
@@ -1825,9 +1859,9 @@ exports.adminApprovePI = async (req, res) => {
         billing_address,
         shipping_address,
         receiver_courier_name,
-        transport_amount: transportAmount,
+        transport_amount: transport_amount || 0,
         perforation_qty: perforation_qty || 0,
-        perforation_amount: perforationAmount,
+        perforation_amount: perforation_amount || 0,
         perforation_payment_status,
         status: "ACTIVE",
         confirmed_at: new Date(),
@@ -1839,6 +1873,340 @@ exports.adminApprovePI = async (req, res) => {
     res.json({
       message: "PI approved successfully",
       pi_id: pi.id,
+    });
+  } catch (err) {
+    await t.rollback();
+    res.status(400).json({ error: err.message });
+  }
+};
+
+/**
+ * List available hides for admin to reallocate during approval
+ * Supports search by hide_id and pagination
+ */
+exports.listAvailableHidesForReallocation = async (req, res) => {
+  try {
+    const { product_id, search, page = 1, limit = 50 } = req.query;
+    
+    if (!product_id) {
+      return res.status(400).json({ error: "product_id is required" });
+    }
+
+    const where = {
+      product_id: Number(product_id),
+      status: "AVAILABLE",
+      qty: { [Op.gt]: 0 }
+    };
+
+    // Add search filter if provided
+    if (search && search.trim()) {
+      where.hide_id = { [Op.iLike]: `%${search.trim()}%` };
+    }
+
+    const offset = (Number(page) - 1) * Number(limit);
+
+    const hides = await LeatherHideStock.findAll({
+      where,
+      attributes: ["id", "hide_id", "qty", "batch_no", "batch_id", "createdAt"],
+      include: [
+        {
+          model: LeatherProduct,
+          as: "product",
+          attributes: ["leather_code", "color"],
+        },
+        {
+          model: Batch,
+          as: "batch",
+          attributes: ["batch_no", "collection_series_id"],
+          include: [
+            {
+              model: CollectionSeries,
+              as: "series",
+              attributes: ["id", "name"],
+            }
+          ]
+        }
+      ],
+      order: [["qty", "DESC"], ["createdAt", "ASC"]],
+      limit: Number(limit),
+      offset: offset,
+    });
+
+    const total = await LeatherHideStock.count({ where });
+
+    res.json({
+      hides: hides.map(h => ({
+        id: h.id,
+        hide_id: h.hide_id,
+        qty: h.qty,
+        batch_no: h.batch_no,
+        leather_code: h.product?.leather_code,
+        color: h.product?.color,
+        collection_series_id: h.batch?.collection_series_id || null,
+        collection_name: h.batch?.series?.name || "N/A",
+        created_at: h.createdAt,
+      })),
+      pagination: {
+        page: Number(page),
+        limit: Number(limit),
+        total,
+        totalPages: Math.ceil(total / Number(limit)),
+      }
+    });
+  } catch (err) {
+    console.error("listAvailableHidesForReallocation error:", err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+/**
+ * Admin-only: Update hide stock details
+ */
+exports.adminUpdateHideStock = async (req, res) => {
+  const t = await sequelize.transaction();
+
+  try {
+    const { id } = req.params;
+    const { hide_id, qty, batch_no, grade, remarks, status } = req.body;
+
+    const hideStock = await LeatherHideStock.findByPk(id, { transaction: t });
+    if (!hideStock) {
+      throw new Error("Hide stock not found");
+    }
+
+    // Validate status
+    if (status && !["AVAILABLE", "RESERVED", "BLOCKED"].includes(status)) {
+      throw new Error("Invalid status. Must be AVAILABLE, RESERVED, or BLOCKED");
+    }
+
+    // Update hide stock
+    await hideStock.update({
+      hide_id: hide_id || hideStock.hide_id,
+      qty: qty !== undefined ? qty : hideStock.qty,
+      batch_no: batch_no || hideStock.batch_no,
+      grade: grade !== undefined ? grade : hideStock.grade,
+      remarks: remarks !== undefined ? remarks : hideStock.remarks,
+      status: status || hideStock.status,
+    }, { transaction: t });
+
+    await t.commit();
+
+    res.json({
+      message: "Hide stock updated successfully",
+      hide: {
+        id: hideStock.id,
+        hide_id: hideStock.hide_id,
+        qty: hideStock.qty,
+        batch_no: hideStock.batch_no,
+        grade: hideStock.grade,
+        remarks: hideStock.remarks,
+        status: hideStock.status,
+      }
+    });
+  } catch (err) {
+    await t.rollback();
+    res.status(400).json({ error: err.message });
+  }
+};
+
+/**
+ * Admin-only: Update leather stock details
+ */
+exports.adminUpdateLeatherStock = async (req, res) => {
+  const t = await sequelize.transaction();
+
+  try {
+    const { id } = req.params;
+    const { total_qty, available_qty, reserved_qty, location, estimated_delivery_date } = req.body;
+
+    const leatherStock = await LeatherStock.findByPk(id, { transaction: t });
+    if (!leatherStock) {
+      throw new Error("Leather stock not found");
+    }
+
+    // Validate quantities
+    const newTotalQty = total_qty !== undefined ? total_qty : leatherStock.total_qty;
+    const newAvailableQty = available_qty !== undefined ? available_qty : leatherStock.available_qty;
+    const newReservedQty = reserved_qty !== undefined ? reserved_qty : leatherStock.reserved_qty;
+
+    if (newAvailableQty + newReservedQty > newTotalQty) {
+      throw new Error("Available + Reserved quantity cannot exceed total quantity");
+    }
+
+    // Validate location
+    if (location && !["Bangalore", "Delhi", "Mumbai"].includes(location)) {
+      throw new Error("Invalid location. Must be Bangalore, Delhi, or Mumbai");
+    }
+
+    // Update leather stock
+    await leatherStock.update({
+      total_qty: newTotalQty,
+      available_qty: newAvailableQty,
+      reserved_qty: newReservedQty,
+      location: location || leatherStock.location,
+      estimated_delivery_date: estimated_delivery_date !== undefined ? estimated_delivery_date : leatherStock.estimated_delivery_date,
+    }, { transaction: t });
+
+    await t.commit();
+
+    res.json({
+      message: "Leather stock updated successfully",
+      stock: {
+        id: leatherStock.id,
+        product_id: leatherStock.product_id,
+        total_qty: leatherStock.total_qty,
+        available_qty: leatherStock.available_qty,
+        reserved_qty: leatherStock.reserved_qty,
+        location: leatherStock.location,
+        estimated_delivery_date: leatherStock.estimated_delivery_date,
+      }
+    });
+  } catch (err) {
+    await t.rollback();
+    res.status(400).json({ error: err.message });
+  }
+};
+
+/**
+ * Admin-only: Update batch details
+ */
+exports.adminUpdateBatch = async (req, res) => {
+  const t = await sequelize.transaction();
+
+  try {
+    const { id } = req.params;
+    const { batch_no, description, status } = req.body;
+
+    const batch = await Batch.findByPk(id, { transaction: t });
+    if (!batch) {
+      throw new Error("Batch not found");
+    }
+
+    // Validate status
+    if (status && !["ACTIVE", "CLOSED", "ARCHIVED"].includes(status)) {
+      throw new Error("Invalid status. Must be ACTIVE, CLOSED, or ARCHIVED");
+    }
+
+    // Check if batch_no is unique if being updated
+    if (batch_no && batch_no !== batch.batch_no) {
+      const existingBatch = await Batch.findOne({
+        where: { batch_no },
+        transaction: t
+      });
+      if (existingBatch) {
+        throw new Error("Batch number already exists");
+      }
+    }
+
+    // Update batch
+    await batch.update({
+      batch_no: batch_no || batch.batch_no,
+      description: description !== undefined ? description : batch.description,
+      status: status || batch.status,
+    }, { transaction: t });
+
+    await t.commit();
+
+    res.json({
+      message: "Batch updated successfully",
+      batch: {
+        id: batch.id,
+        batch_no: batch.batch_no,
+        product_id: batch.product_id,
+        collection_series_id: batch.collection_series_id,
+        description: batch.description,
+        status: batch.status,
+      }
+    });
+  } catch (err) {
+    await t.rollback();
+    res.status(400).json({ error: err.message });
+  }
+};
+
+exports.updatePIItem = async (req, res) => {
+  const t = await sequelize.transaction();
+
+  try {
+    const { piId, itemId } = req.params;
+    const { batch_info, hides } = req.body;
+
+    const pi = await ProformaInvoice.findByPk(piId, { transaction: t });
+    if (!pi) {
+      throw new Error("PI not found");
+    }
+
+    const item = await PIItem.findOne({
+      where: { id: itemId, pi_id: piId },
+      transaction: t,
+    });
+    if (!item) {
+      throw new Error("PI item not found");
+    }
+
+    let updatedBatchInfo = [];
+    let updatedQty = item.qty;
+
+    if (Array.isArray(batch_info)) {
+      updatedBatchInfo = batch_info;
+      const sumQty = batch_info.reduce((sum, b) => sum + Number(b.qty || 0), 0);
+      if (!req.body.qty) {
+        updatedQty = sumQty;
+      }
+    } else if (Array.isArray(hides)) {
+      updatedBatchInfo = hides.map((h) => ({
+        hide_id: h.hide_id,
+        batch_no: h.batch_no,
+        qty: Number(h.hide_qty),
+        collection_series_id: h.collection_series_id || null,
+      }));
+      updatedQty = updatedBatchInfo.reduce((sum, b) => sum + Number(b.qty || 0), 0);
+    } else {
+      throw new Error("batch_info or hides array is required");
+    }
+
+    if (req.body.qty !== undefined) {
+      updatedQty = Number(req.body.qty);
+    }
+
+    // Restore previous allocations to AVAILABLE
+    const oldBatches = parseBatchInfo(item.batch_info);
+    for (const b of oldBatches) {
+      if (!b.hide_id) continue;
+      const where = b.id ? { id: Number(b.id) } : { hide_id: b.hide_id, batch_no: b.batch_no };
+      const hideStock = await LeatherHideStock.findOne({
+        where,
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+      if (hideStock && hideStock.status === "RESERVED") {
+        hideStock.status = "AVAILABLE";
+        await hideStock.save({ transaction: t });
+      }
+    }
+
+    await item.update({ batch_info: updatedBatchInfo, qty: updatedQty }, { transaction: t });
+
+    // Reserve new allocations
+    for (const b of updatedBatchInfo) {
+      if (!b.hide_id) continue;
+      const where = b.id ? { id: Number(b.id) } : { hide_id: b.hide_id, batch_no: b.batch_no };
+      const hideStock = await LeatherHideStock.findOne({
+        where,
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+      if (hideStock && hideStock.status === "AVAILABLE") {
+        hideStock.status = "RESERVED";
+        await hideStock.save({ transaction: t });
+      }
+    }
+
+    await t.commit();
+
+    res.json({
+      message: "PI item updated successfully",
+      item,
     });
   } catch (err) {
     await t.rollback();

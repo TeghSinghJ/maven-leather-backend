@@ -11,8 +11,15 @@ router.get("/", requireAuth, controller.getPIs);
 
 // Specific routes MUST come before :id routes
 router.post("/suggest-batch", requireAuth, controller.suggestBatch);
+router.get("/hides/available", requireAuth, controller.listAvailableHidesForReallocation);
 router.post("/confirmed", requireAuth, controller.createPIConfirmed);
 router.get("/pending/approval", requireAuth, requireAdmin, controller.getPendingApprovalPIs);
+
+// Admin-only stock management routes
+router.put("/hide-stock/:id", requireAuth, requireAdmin, controller.adminUpdateHideStock);
+router.put("/leather-stock/:id", requireAuth, requireAdmin, controller.adminUpdateLeatherStock);
+router.put("/batch/:id", requireAuth, requireAdmin, controller.adminUpdateBatch);
+router.put("/:piId/items/:itemId", requireAuth, requireAdmin, controller.updatePIItem);
 
 // ID-based routes
 router.post("/:id/cancel", requireAuth, controller.cancelPI);
