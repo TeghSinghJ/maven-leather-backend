@@ -17,6 +17,7 @@ router.get("/pending/approval", requireAuth, requireAdmin, controller.getPending
 // ID-based routes
 router.post("/:id/cancel", requireAuth, controller.cancelPI);
 router.post("/:id/approve", requireAuth, requireAdmin, controller.adminApprovePI);
+router.post("/:id/dispatch", requireAuth, requireAdmin, controller.dispatchPI);
 router.post("/:id/suggest-revisit", requireAuth, controller.suggestRevisit);
 router.put("/:id/revisit", requireAuth, controller.revisitPI);
 router.get("/:id/download", requireAuth, controller.downloadPI);

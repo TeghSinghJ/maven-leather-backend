@@ -81,6 +81,12 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   let y = 40;
 
+  /* ---------- PAGE TITLE ---------- */
+  doc.font("Helvetica-Bold").fontSize(14).text("Proforma Invoice", pageLeft, borderTop - 28, {
+    width: contentWidth,
+    align: "center",
+  });
+
   /* ---------- HEADER (table-based) ---------- */
   // pageLeft, pageRight, contentWidth already defined in border section above
 
@@ -123,11 +129,10 @@ module.exports = function generateExactPIPdf(res, pi) {
   const invoiceNo = `${isWestern ? "WC/PI/2526/" : "MLM/PI/"}${financialYear}/${invoiceIdNumber}`;
 
   const invoiceFields = [
-    ["Invoice No", invoiceNo],
+    ["Proforma Invoice No", invoiceNo],
   ].filter(([, value]) => value && String(value).trim() !== "-");
 
-  doc.font("Helvetica-Bold").fontSize(9).text("Invoice Info", colBX + 4, y + 4);
-  let invY = y + 18;
+  let invY = y + 4;
   invoiceFields.forEach(([label, value]) => {
     doc.font("Helvetica").fontSize(8).text(`${label}:`, colBX + 4, invY, { continued: true });
     doc.font("Helvetica-Bold").text(` ${value}`);
@@ -268,9 +273,9 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc.font("Helvetica").text(String(i + 1), xSel + 2, y + 3);
     doc.font("Helvetica-Bold").text(`${item.product?.leather_code || ""} ${item.product?.color || ""}`, xDesc + 2, y + 3, { width: colWidths.desc - 4 });
     doc.font("Helvetica").text(isVitton ? "56039400" : (item.product?.hsn_code || "41079100"), xHsn + 2, y + 3);
-    doc.text(`${qty.toFixed(2)} ${isVitton ? "SQM" : "SQF"}`, xQty + 2, y + 3);
+    doc.text(`${qty.toFixed(2)} ${isVitton ? "MTR" : "SQF"}`, xQty + 2, y + 3);
     doc.text(rate.toFixed(2), xRate + 2, y + 3);
-    doc.text(isVitton ? "SQM" : "SQF", xPer + 2, y + 3);
+    doc.text(isVitton ? "MTR" : "SQF", xPer + 2, y + 3);
     doc.text("-", xDisc + 2, y + 3);
     doc.text(amount.toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
 
@@ -300,7 +305,7 @@ module.exports = function generateExactPIPdf(res, pi) {
   doc.moveTo(xDisc, y).lineTo(xDisc, y + rowHeight).stroke();
 
   doc.font("Helvetica-Bold").fontSize(9).text("Total", xDesc + 2, y + 3);
-  doc.font("Helvetica-Bold").text(`${pi.total_qty?.toFixed(2) || (pi.items[0]?.qty || 0).toFixed(2)} ${isVitton ? "SQM" : "SQF"}`, xQty + 2, y + 3, { width: colWidths.qty, align: "center" });
+  doc.font("Helvetica-Bold").text(`${pi.total_qty?.toFixed(2) || (pi.items[0]?.qty || 0).toFixed(2)} ${isVitton ? "MTR" : "SQF"}`, xQty + 2, y + 3, { width: colWidths.qty, align: "center" });
   doc.text((subtotal + transportCharge).toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
 
   y += rowHeight;
@@ -443,13 +448,24 @@ y += 5;
 
   // Right: Signature
   const rightColX = pageLeft + Math.floor(contentWidth * 0.6) + 4;
-  doc.font("Helvetica-Bold").fontSize(9).text(company.signature, rightColX, y + 30, { align: "right", width: Math.floor(contentWidth * 0.4) - 8 });
-  doc.font("Helvetica").fontSize(8).text("Authorised Signatory", rightColX, y + 60, { align: "right", width: Math.floor(contentWidth * 0.4) - 8 });
+  const rightColWidth = Math.floor(contentWidth * 0.4) - 8;
+  const rightColCenter = rightColX + (rightColWidth / 2);
+  doc.font("Helvetica-Bold").fontSize(9).text(company.signature, rightColCenter - 40, y + 30, { align: "center", width: 80 });
+  doc.font("Helvetica").fontSize(8).text("Authorised Signatory", rightColCenter - 40, y + 60, { align: "center", width: 80 });
 
+  // Add company seal if available
+  const sealPath = path.resolve(__dirname, `../../assets/${isWestern ? 'western-seal.png' : 'marvin-seal.png'}`);
+  if (fs.existsSync(sealPath)) {
+    doc.image(sealPath, rightColX + Math.floor(contentWidth * 0.4) - 60, y + 4, { width: 50, height: 50 });
+  }
+
+  // Add professional note below the signature (on same page)
   doc
+    .font("Helvetica-Oblique")
     .fontSize(8)
-    .text("This is a computer generated invoice", 0, 780, {
-      align: "center"
+    .text("This is a computer generated Proforma Invoice and does not require any signature", pageLeft, y + 85, {
+      align: "center",
+      width: contentWidth
     });
 
   doc.end();

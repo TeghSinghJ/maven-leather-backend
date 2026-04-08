@@ -16,6 +16,46 @@ const {
 const { Op, Transaction } = require("sequelize");
 const { COMPANY, COMPANY_LIST } = require("../constants/company.constants");
 const generateExactPIPdf = require('../utils/piPdf');
+
+const parseBatchInfo = (batchInfo) => {
+  if (Array.isArray(batchInfo)) return batchInfo;
+  if (typeof batchInfo === "string") {
+    try {
+      return JSON.parse(batchInfo);
+    } catch {
+      return [];
+    }
+  }
+  return [];
+};
+
+const blockHideStockBatchItems = async (pi, transaction) => {
+  if (!pi.items || !Array.isArray(pi.items)) return;
+
+  for (const item of pi.items) {
+    const batches = parseBatchInfo(item.batch_info);
+    for (const b of batches) {
+      if (!b.hide_id || b.hide_id === "roll") continue;
+
+      const hideStock = await LeatherHideStock.findOne({
+        where: { hide_id: b.hide_id },
+        transaction,
+        lock: transaction.LOCK.UPDATE,
+      });
+
+      if (!hideStock) {
+        console.warn(
+          `HideStock not found while blocking PI (hide_id=${b.hide_id}), skipping`,
+        );
+        continue;
+      }
+
+      hideStock.status = "BLOCKED";
+      await hideStock.save({ transaction });
+    }
+  }
+};
+
 /**
  * Utility: Find optimal hide combinations for a requested quantity
  * Returns combinations sorted by closeness to requested quantity
@@ -280,9 +320,12 @@ exports.getPIs = async (req, res) => {
       where.created_by = req.user.id;
     }
 
-    // Date filter
-    const { dateFilter } = req.query;
-    console.log("Date filter received:", dateFilter);
+    // Date filter + status filter
+    const { dateFilter, status } = req.query;
+    console.log("Date filter received:", dateFilter, "status filter:", status);
+    if (status && status !== "ALL") {
+      where.status = status;
+    }
     if (dateFilter && dateFilter !== "all") {
       const now = new Date();
       if (dateFilter === "today") {
@@ -314,6 +357,10 @@ exports.getPIs = async (req, res) => {
         "company_name",
         "created_by",
         "status",
+        "invoice_bill_number",
+        "confirmed_at",
+        "dispatched_at",
+        "cancelled_at",
         "expires_at",
         "createdAt",
         "updatedAt",
@@ -765,6 +812,7 @@ exports.suggestRevisit = async (req, res) => {
             difference_abs: Math.abs(requestedQty),
             hides: [],
             rate,
+            unit: "mtr",
             reason: "No available roll stock",
           });
           continue;
@@ -779,7 +827,8 @@ exports.suggestRevisit = async (req, res) => {
             difference_abs: Math.abs(requestedQty),
             hides: [],
             rate,
-            reason: `Available roll size is ${stock.available_qty} sqm, requested ${requestedQty} sqm. Cannot allocate partial roll.`,
+            unit: "mtr",
+            reason: `Vitton roll must be taken as a full roll. Available roll size is ${stock.available_qty} mtr, requested ${requestedQty} mtr.`,
           });
           continue;
         }
@@ -795,6 +844,7 @@ exports.suggestRevisit = async (req, res) => {
           within_tolerance: true,
           hides: [{ hide_id: "roll", hide_qty: requestedQty }],
           rate,
+          unit: "mtr",
           line_amount: Number((requestedQty * rate).toFixed(2)),
         });
         continue;
@@ -841,6 +891,7 @@ exports.suggestRevisit = async (req, res) => {
           difference_abs: Math.abs(requestedQty),
           hides: [],
           rate,
+          unit: "sqft",
           reason: "Cannot find optimal hide combination",
         });
         continue;
@@ -862,6 +913,7 @@ exports.suggestRevisit = async (req, res) => {
           hide_qty: h.hide_qty,
         })),
         rate,
+        unit: "sqft",
         line_amount: Number((bestMatch.allocated_qty * rate).toFixed(2)),
       });
     }
@@ -1760,6 +1812,8 @@ exports.adminApprovePI = async (req, res) => {
     }
 
     // 🔹 Update PI - Always save transport_amount and perforation_amount, regardless of payment status
+    await blockHideStockBatchItems(pi, t);
+
     await pi.update(
       {
         transport_type_id,
@@ -1775,7 +1829,8 @@ exports.adminApprovePI = async (req, res) => {
         perforation_qty: perforation_qty || 0,
         perforation_amount: perforationAmount,
         perforation_payment_status,
-        status: "CONFIRMED",
+        status: "ACTIVE",
+        confirmed_at: new Date(),
       },
       { transaction: t },
     );
@@ -1785,6 +1840,73 @@ exports.adminApprovePI = async (req, res) => {
       message: "PI approved successfully",
       pi_id: pi.id,
     });
+  } catch (err) {
+    await t.rollback();
+    res.status(400).json({ error: err.message });
+  }
+};
+
+exports.dispatchPI = async (req, res) => {
+  const t = await sequelize.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  });
+
+  try {
+    const { invoice_bill_number } = req.body;
+    if (!invoice_bill_number || String(invoice_bill_number).trim() === "") {
+      throw new Error("invoice_bill_number is required to dispatch a PI");
+    }
+
+    const pi = await ProformaInvoice.findByPk(req.params.id, {
+      include: [
+        {
+          model: PIItem,
+          as: "items",
+          attributes: ["id", "product_id", "qty", "batch_info"],
+        },
+      ],
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+
+    if (!pi) throw new Error("PI not found");
+    if (!["ACTIVE", "CONFIRMED"].includes(pi.status)) {
+      throw new Error("Only ACTIVE or CONFIRMED PI can be dispatched");
+    }
+
+    const productIds = pi.items.map((i) => i.product_id);
+    const stocks = await LeatherStock.findAll({
+      where: { product_id: { [Op.in]: productIds } },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    const stockMap = {};
+    stocks.forEach((s) => (stockMap[s.product_id] = s));
+
+    for (const item of pi.items) {
+      const stock = stockMap[item.product_id];
+      if (!stock) continue;
+
+      stock.reserved_qty -= item.qty;
+      stock.total_qty -= item.qty;
+      if (stock.reserved_qty < 0) stock.reserved_qty = 0;
+      if (stock.total_qty < 0) stock.total_qty = 0;
+      await stock.save({ transaction: t });
+    }
+
+    await blockHideStockBatchItems(pi, t);
+
+    await pi.update(
+      {
+        status: "DISPATCHED",
+        invoice_bill_number: String(invoice_bill_number).trim(),
+        dispatched_at: new Date(),
+      },
+      { transaction: t },
+    );
+
+    await t.commit();
+    res.json({ message: "PI dispatched successfully", pi_id: pi.id });
   } catch (err) {
     await t.rollback();
     res.status(400).json({ error: err.message });

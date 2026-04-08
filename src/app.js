@@ -62,12 +62,20 @@ cron.schedule('0 0 * * *', async () => { // Run daily at midnight
 
     const oldPIs = await ProformaInvoice.findAll({
       where: {
-        status: { [Op.in]: ['ACTIVE', 'PENDING_APPROVAL'] },
-        createdAt: { [Op.lt]: sevenDaysAgo }
+        [Op.or]: [
+          {
+            status: { [Op.in]: ['ACTIVE', 'PENDING_APPROVAL'] },
+            createdAt: { [Op.lt]: sevenDaysAgo },
+          },
+          {
+            status: 'CONFIRMED',
+            confirmed_at: { [Op.lt]: sevenDaysAgo },
+          },
+        ],
       },
       include: [{ model: PIItem, as: 'items' }],
       transaction: t,
-      lock: t.LOCK.UPDATE
+      lock: t.LOCK.UPDATE,
     });
 
     for (const pi of oldPIs) {

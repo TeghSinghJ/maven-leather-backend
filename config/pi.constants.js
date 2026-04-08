@@ -1,7 +1,7 @@
 module.exports = {
   COMPANIES: {
     MARVIN: {
-      name: "Marvin Lifestyle India Pvt. Ltd. (Bangalore) 26-27",
+      name: "Marvin Lifestyle India Pvt. Ltd. (Bangalore)",
       address: "#45, Unit # 101,201,301, Sriven Rag Landmark, Wilson Garden, Near Brand Factory, Bangaluru-560027",
       gstin: "29AAGCM7754A1ZD",
       state: "Karnataka",
@@ -11,7 +11,7 @@ module.exports = {
       accountNo: "840930110000045",
       ifsc: "BKID0008409",
       branch: "Richmond Town",
-      signature: "for Marvin Lifestyle India Pvt. Ltd.",
+      signature: " Marvin Lifestyle India Pvt. Ltd.",
     },
     WESTERN: {
       name: "Western Colour",
@@ -29,7 +29,7 @@ module.exports = {
   },
   // Legacy support - default to MARVIN
   COMPANY: {
-    name: "Marvin Lifestyle India Pvt. Ltd. (Bangalore) 26-27",
+    name: "Marvin Lifestyle India Pvt. Ltd. (Bangalore)",
     address: "#45, Unit # 101,201,301, Sriven Rag Landmark, Wilson Garden, Near Brand Factory, Bangaluru-560027",
     gstin: "29AAGCM7754A1ZD",
     state: "Karnataka",

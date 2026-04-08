@@ -54,10 +54,28 @@ module.exports = (sequelize, DataTypes) => {
           "ACTIVE",
           "PENDING_APPROVAL",
           "CONFIRMED",
+          "DISPATCHED",
           "EXPIRED",
           "CANCELLED",
         ),
         defaultValue: "PENDING_APPROVAL",
+      },
+
+      invoice_bill_number: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      confirmed_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      dispatched_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+      },
+      cancelled_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
       },
 
       expires_at: DataTypes.DATE,
