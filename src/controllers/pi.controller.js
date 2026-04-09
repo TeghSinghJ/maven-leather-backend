@@ -52,6 +52,7 @@ const blockHideStockBatchItems = async (pi, transaction) => {
       }
 
       hideStock.status = "BLOCKED";
+      console.log(`Blocking HideStock (hide_id=${b.hide_id}, batch_no=${b.batch_no}) status: ${hideStock.status}`);
       await hideStock.save({ transaction });
     }
   }
@@ -408,13 +409,14 @@ exports.getPIs = async (req, res) => {
       ],
       order: [["createdAt", "DESC"]],
     });
-
+    console.log("Fetched PI : ",pis)
     const formattedResponse = pis.map((pi) => {
       const piJson = pi.toJSON();
-
+      console.log("FOrmatted json :",piJson.status)
       return {
         ...piJson,
         ...(piJson.customer || {}),
+        status: piJson.status,
         customer: undefined,
       };
     });
@@ -596,6 +598,7 @@ exports.cancelPI = async (req, res) => {
     }
 
     pi.status = "CANCELLED";
+    console.log(`PI status changing to ${pi.status}`);
     pi.cancelled_at = new Date();
     await pi.save({ transaction: t });
     await t.commit();

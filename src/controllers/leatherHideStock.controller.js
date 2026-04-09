@@ -102,7 +102,7 @@ exports.listByProduct = async (req, res) => {
     const hides = await LeatherHideStock.findAll({
       where: {
         product_id: productId,
-        qty: { [Op.gt]: 0 }, 
+        // qty: { [Op.gt]: 0 }, 
       },
     });
 
