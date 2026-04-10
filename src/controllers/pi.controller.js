@@ -2132,7 +2132,12 @@ exports.updatePIItem = async (req, res) => {
 
   try {
     const { piId, itemId } = req.params;
-    const { batch_info, hides } = req.body;
+    const { batch_info, hides, hides_to_release = [], hides_to_block = [] } = req.body;
+
+    console.log(`🔄 Updating PI ${piId} Item ${itemId}`);
+    console.log("📦 Received batch_info:", JSON.stringify(batch_info, null, 2));
+    console.log("📦 Received hides:", JSON.stringify(hides, null, 2));
+    console.log(`📊 Frontend sent: batch_info=${batch_info?.length || 'N/A'} items, hides=${hides?.length || 'N/A'} items`);
 
     const pi = await ProformaInvoice.findByPk(piId, { transaction: t });
     if (!pi) {
@@ -2146,6 +2151,8 @@ exports.updatePIItem = async (req, res) => {
     if (!item) {
       throw new Error("PI item not found");
     }
+
+    console.log("✓ Found item:", { id: item.id, product_id: item.product_id, current_batch_info: item.batch_info });
 
     let updatedBatchInfo = [];
     let updatedQty = item.qty;
@@ -2172,47 +2179,153 @@ exports.updatePIItem = async (req, res) => {
       updatedQty = Number(req.body.qty);
     }
 
-    // Restore previous allocations to AVAILABLE
-    const oldBatches = parseBatchInfo(item.batch_info);
-    for (const b of oldBatches) {
-      if (!b.hide_id) continue;
-      const where = b.id ? { id: Number(b.id) } : { hide_id: b.hide_id, batch_no: b.batch_no };
-      const hideStock = await LeatherHideStock.findOne({
-        where,
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      });
-      if (hideStock && hideStock.status === "RESERVED") {
-        hideStock.status = "AVAILABLE";
-        await hideStock.save({ transaction: t });
+    console.log(`📦 Final updatedBatchInfo has ${updatedBatchInfo.length} hides:`, updatedBatchInfo.map(b => ({ hide_id: b.hide_id, qty: b.qty })));
+    // Otherwise, calculate by comparing old vs new allocations
+    let hideIDsToRelease = hides_to_release;
+    let hideIDsToBlock = hides_to_block;
+
+    if (hideIDsToRelease.length === 0 || hideIDsToBlock.length === 0) {
+      // Calculate release/block if not explicitly provided
+      const oldBatches = parseBatchInfo(item.batch_info);
+      const oldHideIDs = oldBatches.map(b => b.hide_id).filter(Boolean);
+      const newHideIDs = updatedBatchInfo.map(b => b.hide_id).filter(Boolean);
+      
+      if (hideIDsToRelease.length === 0) {
+        hideIDsToRelease = oldHideIDs.filter(id => !newHideIDs.includes(id));
+      }
+      if (hideIDsToBlock.length === 0) {
+        hideIDsToBlock = newHideIDs.filter(id => !oldHideIDs.includes(id));
       }
     }
 
-    await item.update({ batch_info: updatedBatchInfo, qty: updatedQty }, { transaction: t });
-
-    // Reserve new allocations
-    for (const b of updatedBatchInfo) {
-      if (!b.hide_id) continue;
-      const where = b.id ? { id: Number(b.id) } : { hide_id: b.hide_id, batch_no: b.batch_no };
+    // Release hides explicitly marked for release
+    console.log("🔓 Releasing hides:", hideIDsToRelease);
+    for (const hideId of hideIDsToRelease) {
+      console.log(`  Searching for hide_id: ${hideId}`);
       const hideStock = await LeatherHideStock.findOne({
-        where,
+        where: { hide_id: hideId },
         transaction: t,
         lock: t.LOCK.UPDATE,
       });
-      if (hideStock && hideStock.status === "AVAILABLE") {
+      if (hideStock) {
+        console.log(`    ✓ Found! Current status: ${hideStock.status}`);
+        if (hideStock.status === "RESERVED") {
+          hideStock.status = "AVAILABLE";
+          hideStock.updated_by_admin = true;
+          await hideStock.save({ transaction: t });
+          console.log(`    ✓ Released! Status: RESERVED → AVAILABLE`);
+        } else {
+          console.log(`    ⚠ Status is "${hideStock.status}", not RESERVED. No action taken.`);
+        }
+      } else {
+        console.log(`    ✗ Hide not found in leather_hide_stocks table!`);
+      }
+    }
+
+    // Release all old allocations that are not in the new selections
+    console.log("🔄 Checking old batch allocations for release...");
+    const oldBatches = parseBatchInfo(item.batch_info);
+    console.log("  Old batches in DB:", JSON.stringify(oldBatches.map(b => ({ hide_id: b.hide_id, qty: b.qty, batch_no: b.batch_no }))));
+    
+    for (const b of oldBatches) {
+      if (!b.hide_id) {
+        console.log(`  Skipping batch entry without hide_id`);
+        continue;
+      }
+      
+      // Skip if this hide is still being used
+      if (updatedBatchInfo.some(nb => nb.hide_id === b.hide_id)) {
+        console.log(`  ✓ Hide ${b.hide_id} still in use, skipping release`);
+        continue;
+      }
+      
+      console.log(`  Releasing old hide: ${b.hide_id}`);
+      const hideStock = await LeatherHideStock.findOne({
+        where: { hide_id: b.hide_id },
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+      
+      if (hideStock) {
+        console.log(`    ✓ Found in DB. Current status: ${hideStock.status}`);
+        if (hideStock.status === "RESERVED") {
+          hideStock.status = "AVAILABLE";
+          await hideStock.save({ transaction: t });
+          console.log(`    ✓ Released! Status: RESERVED → AVAILABLE`);
+        } else {
+          console.log(`    ⚠ Status is "${hideStock.status}", not RESERVED`);
+        }
+      } else {
+        console.log(`    ✗ Hide not found in leather_hide_stocks!`);
+      }
+    }
+
+    // Update the PI item with new batch info
+    await item.update({ batch_info: updatedBatchInfo, qty: updatedQty }, { transaction: t });
+    console.log("✓ Item updated in database with:", { batch_info: updatedBatchInfo, qty: updatedQty });
+
+    // Block (reserve) new hides
+    console.log(`\n🔐 BLOCKING HIDES: Total hides to block = ${updatedBatchInfo.length}`);
+    console.log("Hides list:", updatedBatchInfo.map(b => ({ hide_id: b.hide_id, qty: b.qty, batch_no: b.batch_no })));
+    
+    let blockedCount = 0;
+    let notFoundCount = 0;
+    let alreadyReservedCount = 0;
+    
+    for (let i = 0; i < updatedBatchInfo.length; i++) {
+      const b = updatedBatchInfo[i];
+      if (!b.hide_id) {
+        console.log(`  [${i + 1}/${updatedBatchInfo.length}] Skipping - no hide_id`);
+        continue;
+      }
+      
+      console.log(`\n  [${i + 1}/${updatedBatchInfo.length}] Processing hide: ${b.hide_id} (Qty: ${b.qty})`);
+      const hideStock = await LeatherHideStock.findOne({
+        where: { hide_id: b.hide_id },
+        transaction: t,
+        lock: t.LOCK.UPDATE,
+      });
+      
+      if (!hideStock) {
+        console.log(`    ✗ NOT FOUND in database!`);
+        notFoundCount++;
+        continue;
+      }
+      
+      console.log(`    ✓ Found! Current status: "${hideStock.status}"`);
+      if (hideStock.status === "AVAILABLE") {
         hideStock.status = "RESERVED";
         await hideStock.save({ transaction: t });
+        console.log(`    ✓ BLOCKED! Status changed: AVAILABLE → RESERVED`);
+        blockedCount++;
+      } else if (hideStock.status === "RESERVED") {
+        console.log(`    ⚠ Already RESERVED (already blocked)`);
+        alreadyReservedCount++;
+      } else {
+        console.log(`    ⚠ Status is "${hideStock.status}" (not AVAILABLE or RESERVED)`);
       }
     }
+    console.log(`\n📊 Blocking Summary: ${blockedCount} blocked, ${alreadyReservedCount} already reserved, ${notFoundCount} not found`);
 
     await t.commit();
+    console.log("✓ Transaction committed successfully");
+    console.log(`📊 SUMMARY: Released ${hideIDsToRelease.length} hides, Blocked ${hideIDsToBlock.length} hides`);
+
+    // Refresh item from database to get the latest state
+    const freshItem = await PIItem.findOne({
+      where: { id: itemId, pi_id: piId }
+    });
+    console.log("✓ Fresh item batch_info from DB:", JSON.stringify(freshItem.batch_info));
 
     res.json({
       message: "PI item updated successfully",
-      item,
+      item: freshItem,
+      hides_released: hideIDsToRelease,
+      hides_blocked: hideIDsToBlock,
     });
   } catch (err) {
     await t.rollback();
+    console.error("❌ Error updating PI item:", err);
     res.status(400).json({ error: err.message });
   }
 };
