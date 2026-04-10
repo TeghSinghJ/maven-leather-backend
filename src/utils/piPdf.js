@@ -434,10 +434,8 @@ y += 5;
   doc.text("Freight & Forwarding Charges will be invoiced at actuals.", pageLeft, y);
   y += 20;
 
-  /* ---------- FOOTER (BANK + SIGNATURE) ---------- */
-  const footerBoxHeight = 80;
-  doc.lineWidth(1).rect(pageLeft, y, contentWidth, footerBoxHeight).stroke();
-  doc.moveTo(pageLeft + contentWidth * 0.6, y).lineTo(pageLeft + contentWidth * 0.6, y + footerBoxHeight).stroke();
+  /* ---------- FOOTER (BANK + NOTE) ---------- */
+  const footerBlockHeight = 65;
 
   // Left: Bank Details
   doc.font("Helvetica-Bold").fontSize(9).text("Bank Details", pageLeft + 4, y + 4);
@@ -446,12 +444,11 @@ y += 5;
   doc.text(`Branch: ${company.branch}`, pageLeft + 4, y + 36);
   doc.text(`IFSC: ${company.ifsc}`, pageLeft + 4, y + 46);
 
-  // Right: Signature
+  // Right: Signature placeholder
   const rightColX = pageLeft + Math.floor(contentWidth * 0.6) + 4;
   const rightColWidth = Math.floor(contentWidth * 0.4) - 8;
   const rightColCenter = rightColX + (rightColWidth / 2);
-  doc.font("Helvetica-Bold").fontSize(9).text(company.signature, rightColCenter - 40, y + 30, { align: "center", width: 80 });
-  doc.font("Helvetica").fontSize(8).text("Authorised Signatory", rightColCenter - 40, y + 60, { align: "center", width: 80 });
+  doc.font("Helvetica-Bold").fontSize(9).text(company.signature, rightColCenter - 40, y + 10, { align: "center", width: 80 });
 
   // Add company seal if available
   const sealPath = path.resolve(__dirname, `../../assets/${isWestern ? 'western-seal.png' : 'marvin-seal.png'}`);
@@ -459,13 +456,17 @@ y += 5;
     doc.image(sealPath, rightColX + Math.floor(contentWidth * 0.4) - 60, y + 4, { width: 50, height: 50 });
   }
 
-  // Add professional note below the signature (on same page)
+  // Add professional note near the bottom page border, centered.
+  const noteText = "This is a computer generated Proforma Invoice and does not require any signature";
+  const pageBottomLimit = doc.page.height - doc.page.margins.bottom - 12;
+  const noteY = pageBottomLimit - 8;
+
   doc
     .font("Helvetica-Oblique")
     .fontSize(8)
-    .text("This is a computer generated Proforma Invoice and does not require any signature", pageLeft, y + 85, {
-      align: "center",
-      width: contentWidth
+    .text(noteText, pageLeft, noteY, {
+      width: contentWidth,
+      align: "center"
     });
 
   doc.end();
