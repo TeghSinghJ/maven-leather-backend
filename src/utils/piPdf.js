@@ -439,10 +439,11 @@ y += 5;
 
   // Left: Bank Details
   doc.font("Helvetica-Bold").fontSize(9).text("Bank Details", pageLeft + 4, y + 4);
-  doc.font("Helvetica").fontSize(8).text(`Bank: ${company.bankName}`, pageLeft + 4, y + 16);
-  doc.text(`Account: ${company.accountNo}`, pageLeft + 4, y + 26);
-  doc.text(`Branch: ${company.branch}`, pageLeft + 4, y + 36);
-  doc.text(`IFSC: ${company.ifsc}`, pageLeft + 4, y + 46);
+  doc.font("Helvetica").fontSize(8).text(`Bank Name: Bank of India`, pageLeft + 4, y + 16);
+  doc.text(`Account Name: Marvin Lifestyle India Pvt. Ltd.`, pageLeft + 4, y + 26);
+  doc.text(`Account Number: ${company.accountNo}`, pageLeft + 4, y + 36);
+  doc.text(`Branch: ${company.branch}`, pageLeft + 4, y + 46);
+  doc.text(`IFSC: ${company.ifsc}`, pageLeft + 4, y + 56);
 
   // Right: Signature placeholder
   const rightColX = pageLeft + Math.floor(contentWidth * 0.6) + 4;
