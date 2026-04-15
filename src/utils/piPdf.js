@@ -259,7 +259,9 @@ module.exports = function generateExactPIPdf(res, pi) {
   pi.items.forEach((item, i) => {
     const rate = item.rate || 0;
     const qty = item.qty || 0;
-    const amount = rate * qty;
+    const surcharge = Number(item.surcharge) || 0;
+    const lineAmount = rate * qty;
+    const amount = lineAmount + surcharge;
     subtotal += amount;
 
     doc.lineWidth(0.5).rect(pageLeft, y, contentWidth, rowHeight).stroke();
@@ -280,6 +282,29 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc.text(amount.toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
 
     y += rowHeight;
+
+    // Show surcharge line if present
+    if (surcharge > 0) {
+      doc.lineWidth(0.5).rect(pageLeft, y, contentWidth, rowHeight).stroke();
+      doc.moveTo(xDesc, y).lineTo(xDesc, y + rowHeight).stroke();
+      doc.moveTo(xHsn, y).lineTo(xHsn, y + rowHeight).stroke();
+      doc.moveTo(xQty, y).lineTo(xQty, y + rowHeight).stroke();
+      doc.moveTo(xRate, y).lineTo(xRate, y + rowHeight).stroke();
+      doc.moveTo(xPer, y).lineTo(xPer, y + rowHeight).stroke();
+      doc.moveTo(xDisc, y).lineTo(xDisc, y + rowHeight).stroke();
+
+      doc.font("Helvetica").fontSize(8).text("", xSel + 2, y + 3);
+      doc.text("(+Additional Charge)", xDesc + 2, y + 3, { width: colWidths.desc - 4 });
+      doc.text("", xHsn + 2, y + 3);
+      doc.text("", xQty + 2, y + 3);
+      doc.text("", xRate + 2, y + 3);
+      doc.text("", xPer + 2, y + 3);
+      doc.text("", xDisc + 2, y + 3);
+      doc.text(`+${surcharge.toFixed(2)}`, xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
+      doc.font("Helvetica").fontSize(9);
+      
+      y += rowHeight;
+    }
 
     if (i === 0) {
       const extras = [

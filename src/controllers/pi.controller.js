@@ -322,11 +322,14 @@ exports.getPIs = async (req, res) => {
       where.created_by = req.user.id;
     }
 
-    // Date filter + status filter
-    const { dateFilter, status } = req.query;
-    console.log("Date filter received:", dateFilter, "status filter:", status);
+    // Date filter + status filter + company filter
+    const { dateFilter, status, company_name } = req.query;
+    console.log("Date filter received:", dateFilter, "status filter:", status, "company_name filter:", company_name);
     if (status && status !== "ALL") {
       where.status = status;
+    }
+    if (company_name && company_name !== "ALL") {
+      where.company_name = company_name;
     }
     if (dateFilter && dateFilter !== "all") {
       const now = new Date();
@@ -1157,10 +1160,12 @@ exports.revisitPI = async (req, res) => {
     if (shipping_address !== undefined) pi.shipping_address = shipping_address;
     if (delivery_address !== undefined) pi.delivery_address = delivery_address;
 
+    // Set status back to PENDING_APPROVAL so admin needs to approve the changes
+    pi.status = "PENDING_APPROVAL";
     pi.updatedAt = new Date();
     await pi.save({ transaction: t });
     await t.commit();
-    res.json({ message: "PI revisited successfully" });
+    res.json({ message: "PI revisited successfully. Please wait for admin approval." });
   } catch (err) {
     await t.rollback();
     res.status(400).json({ error: err.message });
@@ -1710,6 +1715,8 @@ exports.adminApprovePI = async (req, res) => {
       transport_amount,
       perforation_amount,
       updated_items, // New: allow admin to update hide allocations
+      manual_item_prices, // New: manual price overrides
+      item_surcharges, // New: surcharges for items
     } = req.body;
 
     console.log("ADMIN APPROVE PI REQUEST:", {
@@ -1719,7 +1726,9 @@ exports.adminApprovePI = async (req, res) => {
       shipping_address,
       transport_type_id,
       transport_id,
-      hasUpdatedItems: !!updated_items
+      hasUpdatedItems: !!updated_items,
+      hasManualPrices: !!manual_item_prices,
+      hasSurcharges: !!item_surcharges,
     });
 
     const pi = await ProformaInvoice.findByPk(id, {
@@ -1736,6 +1745,33 @@ exports.adminApprovePI = async (req, res) => {
     if (!pi) throw new Error("PI not found");
     if (pi.status !== "PENDING_APPROVAL") {
       throw new Error("Only PENDING_APPROVAL PI can be approved");
+    }
+
+    // 🔹 Apply manual prices and surcharges to items
+    if ((manual_item_prices && Object.keys(manual_item_prices).length > 0) ||
+        (item_surcharges && Object.keys(item_surcharges).length > 0)) {
+      console.log("Applying manual prices and surcharges to items");
+      
+      for (const item of pi.items) {
+        const updates = {};
+        
+        // Apply manual price if provided
+        if (manual_item_prices && manual_item_prices[item.id]) {
+          updates.rate = Number(manual_item_prices[item.id]);
+          console.log(`Item ${item.id}: Manual rate updated to ₹${updates.rate}`);
+        }
+        
+        // Apply surcharge if provided
+        if (item_surcharges && item_surcharges[item.id]) {
+          updates.surcharge = Number(item_surcharges[item.id]);
+          console.log(`Item ${item.id}: Surcharge set to ₹${updates.surcharge}`);
+        }
+        
+        // Update item if any changes
+        if (Object.keys(updates).length > 0) {
+          await item.update(updates, { transaction: t });
+        }
+      }
     }
 
     // 🔹 Handle admin updates to hide allocations if provided

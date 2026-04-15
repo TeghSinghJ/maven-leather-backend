@@ -25,6 +25,12 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.JSON,
         allowNull: true,
       },
+      surcharge: {
+        type: DataTypes.FLOAT,
+        allowNull: true,
+        defaultValue: 0,
+        comment: 'Additional amount to add on top of (qty * rate). Use for manual adjustments/discounts',
+      },
     },
     {
       sequelize,
