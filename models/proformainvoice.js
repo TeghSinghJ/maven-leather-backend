@@ -102,6 +102,14 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.ENUM("PAID", "TO_BE_PAID"),
         defaultValue: "TO_BE_PAID",
       },
+      payment_status: {
+        type: DataTypes.ENUM("NOT_PAID", "HALF_PAID", "FULL_PAID"),
+        defaultValue: "NOT_PAID",
+      },
+      amount_paid: {
+        type: DataTypes.FLOAT,
+        defaultValue: 0,
+      },
       receiver_courier_name: {
         type: DataTypes.STRING,
         allowNull: true,

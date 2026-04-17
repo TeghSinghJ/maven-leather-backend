@@ -2471,3 +2471,151 @@ exports.getPendingApprovalPIs = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+exports.getSalesData = async (req, res) => {
+  try {
+    const { period = '7d' } = req.query;
+    const today = new Date();
+    const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
+
+    let days = 7;
+    let periodLabel = 'Last 7 Days';
+    if (period === '15d') {
+      days = 15;
+      periodLabel = 'Last 15 Days';
+    } else if (period === '1m') {
+      days = 30;
+      periodLabel = 'Last 30 Days';
+    }
+
+    const startOfDay = new Date(endOfDay);
+    startOfDay.setDate(startOfDay.getDate() - days);
+
+    const rangePIs = await ProformaInvoice.findAll({
+      where: {
+        createdAt: {
+          [Op.gte]: startOfDay,
+          [Op.lt]: endOfDay,
+        },
+        status: {
+          [Op.ne]: 'CANCELLED',
+        },
+      },
+      include: [
+        {
+          model: PIItem,
+          as: 'items',
+          include: [
+            {
+              model: LeatherProduct,
+              as: 'product',
+              attributes: ['leather_code', 'color'],
+            },
+          ],
+        },
+        {
+          model: Customer,
+          as: 'customer',
+          attributes: ['customer_name', 'gst_number', 'state'],
+        },
+      ],
+      order: [['createdAt', 'DESC']],
+    });
+
+    const salesData = rangePIs.map((pi) => {
+      const totalAmount = pi.items.reduce((sum, item) => sum + (item.qty * item.rate), 0);
+      const articles = pi.items.map((item) => ({
+        code: item.product.leather_code,
+        color: item.product.color,
+        qty: item.qty,
+        rate: item.rate,
+        amount: item.qty * item.rate,
+      }));
+
+      return {
+        pi_id: pi.id,
+        customer_id: pi.customer_id,
+        customer_name: pi.customer?.customer_name || 'Unknown',
+        gst_number: pi.customer?.gst_number || 'N/A',
+        state: pi.customer?.state || 'N/A',
+        status: pi.status,
+        payment_status: pi.payment_status,
+        amount_paid: pi.amount_paid,
+        total_amount: totalAmount,
+        dispatched_at: pi.dispatched_at,
+        articles,
+        created_at: pi.createdAt,
+      };
+    });
+
+    const totalPIs = salesData.length;
+    const dispatchedCount = salesData.filter((pi) => pi.status === 'DISPATCHED').length;
+    const totalRevenue = salesData.reduce((sum, pi) => sum + pi.total_amount, 0);
+    const totalPaid = salesData.reduce((sum, pi) => sum + pi.amount_paid, 0);
+
+    const customerMap = {};
+    salesData.forEach((pi) => {
+      const customerKey = pi.customer_id || `unknown-${pi.pi_id}`;
+      if (!customerMap[customerKey]) {
+        customerMap[customerKey] = {
+          customer_name: pi.customer_name,
+          gst_number: pi.gst_number,
+          state: pi.state,
+          total_amount: 0,
+          total_paid: 0,
+          pending_amount: 0,
+          pi_count: 0,
+        };
+      }
+      customerMap[customerKey].total_amount += pi.total_amount;
+      customerMap[customerKey].total_paid += pi.amount_paid;
+      customerMap[customerKey].pending_amount += pi.total_amount - pi.amount_paid;
+      customerMap[customerKey].pi_count += 1;
+    });
+
+    res.json({
+      summary: {
+        period_label: periodLabel,
+        total_pis: totalPIs,
+        dispatched_count: dispatchedCount,
+        total_revenue: totalRevenue,
+        total_paid: totalPaid,
+        pending_payment: totalRevenue - totalPaid,
+      },
+      customers: Object.values(customerMap),
+      pis: salesData,
+    });
+  } catch (err) {
+    console.error('getSalesData error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.updatePaymentStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { payment_status, amount_paid } = req.body;
+
+    const pi = await ProformaInvoice.findByPk(id);
+    if (!pi) {
+      return res.status(404).json({ error: "PI not found" });
+    }
+
+    // Validate payment_status
+    const validStatuses = ['NOT_PAID', 'HALF_PAID', 'FULL_PAID'];
+    if (!validStatuses.includes(payment_status)) {
+      return res.status(400).json({ error: "Invalid payment status" });
+    }
+
+    // Update payment info
+    await pi.update({
+      payment_status,
+      amount_paid: amount_paid || 0,
+    });
+
+    res.json({ message: "Payment status updated successfully", pi });
+  } catch (err) {
+    console.error('updatePaymentStatus error:', err);
+    res.status(500).json({ error: err.message });
+  }
+};

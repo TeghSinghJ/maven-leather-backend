@@ -14,6 +14,7 @@ router.post("/suggest-batch", requireAuth, controller.suggestBatch);
 router.get("/hides/available", requireAuth, controller.listAvailableHidesForReallocation);
 router.post("/confirmed", requireAuth, controller.createPIConfirmed);
 router.get("/pending/approval", requireAuth, requireAdmin, controller.getPendingApprovalPIs);
+router.get("/sales", requireAuth, controller.getSalesData);
 
 // Admin-only stock management routes
 router.put("/hide-stock/:id", requireAuth, requireAdmin, controller.adminUpdateHideStock);
@@ -27,6 +28,7 @@ router.post("/:id/approve", requireAuth, requireAdmin, controller.adminApprovePI
 router.post("/:id/dispatch", requireAuth, requireAdmin, controller.dispatchPI);
 router.post("/:id/suggest-revisit", requireAuth, controller.suggestRevisit);
 router.put("/:id/revisit", requireAuth, controller.revisitPI);
+router.put("/:id/payment", requireAuth, controller.updatePaymentStatus);
 router.get("/:id/download", requireAuth, controller.downloadPI);
 router.get("/:id", requireAuth, controller.getPIById);
 

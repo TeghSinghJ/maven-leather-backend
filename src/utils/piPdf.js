@@ -464,8 +464,8 @@ y += 5;
 
   // Left: Bank Details
   doc.font("Helvetica-Bold").fontSize(9).text("Bank Details", pageLeft + 4, y + 4);
-  doc.font("Helvetica").fontSize(8).text(`Bank Name: Bank of India`, pageLeft + 4, y + 16);
-  doc.text(`Account Name: Marvin Lifestyle India Private Limited`, pageLeft + 4, y + 26);
+  doc.font("Helvetica").fontSize(8).text(`Bank Name: ${company.bankName}`, pageLeft + 4, y + 16);
+  doc.text(`Account Name: ${company.accountName || company.name}`, pageLeft + 4, y + 26);
   doc.text(`Account Number: ${company.accountNo}`, pageLeft + 4, y + 36);
   doc.text(`Branch: ${company.branch}`, pageLeft + 4, y + 46);
   doc.text(`IFSC: ${company.ifsc}`, pageLeft + 4, y + 56);
