@@ -366,6 +366,8 @@ exports.getPIs = async (req, res) => {
         "confirmed_at",
         "dispatched_at",
         "cancelled_at",
+        "return_reason",
+        "returned_at",
         "expires_at",
         "createdAt",
         "updatedAt",
@@ -2427,6 +2429,114 @@ exports.dispatchPI = async (req, res) => {
 
     await t.commit();
     res.json({ message: "PI dispatched successfully", pi_id: pi.id });
+  } catch (err) {
+    await t.rollback();
+    res.status(400).json({ error: err.message });
+  }
+};
+
+// Return PI - Add stock back to inventory when customer returns it
+exports.returnPI = async (req, res) => {
+  const t = await sequelize.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  });
+
+  try {
+    const { return_reason, returned_items } = req.body;
+
+    if (!return_reason || String(return_reason).trim() === "") {
+      throw new Error("Return reason is required");
+    }
+
+    if (!Array.isArray(returned_items) || returned_items.length === 0) {
+      throw new Error("Returned items are required");
+    }
+
+    const pi = await ProformaInvoice.findByPk(req.params.id, {
+      include: [
+        {
+          model: PIItem,
+          as: "items",
+          attributes: ["id", "product_id", "qty", "batch_info"],
+        },
+      ],
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+
+    if (!pi) throw new Error("PI not found");
+    
+    // Only DISPATCHED PIs can be returned
+    if (pi.status !== "DISPATCHED") {
+      throw new Error("Only DISPATCHED PI can be returned");
+    }
+
+    const productIds = pi.items.map((i) => i.product_id);
+    const stocks = await LeatherStock.findAll({
+      where: { product_id: { [Op.in]: productIds } },
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+    const stockMap = {};
+    stocks.forEach((s) => (stockMap[s.product_id] = s));
+
+    let totalReturnedQty = 0;
+
+    // Process each returned item
+    for (const returnedItem of returned_items) {
+      const item = pi.items.find(i => i.id == returnedItem.item_id);
+      if (!item) continue;
+
+      const stock = stockMap[item.product_id];
+      if (!stock) continue;
+
+      let itemReturnedQty = 0;
+
+      // Restore hide stocks
+      for (const hide of returnedItem.returned_hides) {
+        const hideStock = await LeatherHideStock.findOne({
+          where: { hide_id: hide.hide_id, batch_no: hide.batch_no },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+
+        if (!hideStock) {
+          console.warn(`HideStock not found for return: hide_id=${hide.hide_id}, batch_no=${hide.batch_no}`);
+          continue;
+        }
+
+        hideStock.qty += hide.qty;
+        hideStock.status = "AVAILABLE";
+        await hideStock.save({ transaction: t });
+
+        itemReturnedQty += hide.qty;
+      }
+
+      // Restore overall stock
+      stock.total_qty += itemReturnedQty;
+      stock.available_qty = (stock.available_qty || 0) + itemReturnedQty;
+      stock.reserved_qty = Math.max(0, stock.reserved_qty - itemReturnedQty);
+      await stock.save({ transaction: t });
+
+      totalReturnedQty += itemReturnedQty;
+    }
+
+    // Update PI status to RETURNED
+    await pi.update(
+      {
+        status: "RETURNED",
+        return_reason: String(return_reason).trim(),
+        returned_at: new Date(),
+      },
+      { transaction: t },
+    );
+
+    await t.commit();
+    res.json({ 
+      message: "PI returned successfully and stock added back to inventory", 
+      pi_id: pi.id,
+      returned_qty: totalReturnedQty
+    });
   } catch (err) {
     await t.rollback();
     res.status(400).json({ error: err.message });

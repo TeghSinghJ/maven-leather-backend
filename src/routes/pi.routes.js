@@ -26,6 +26,7 @@ router.put("/:piId/items/:itemId", requireAuth, requireAdmin, controller.updateP
 router.post("/:id/cancel", requireAuth, controller.cancelPI);
 router.post("/:id/approve", requireAuth, requireAdmin, controller.adminApprovePI);
 router.post("/:id/dispatch", requireAuth, requireAdmin, controller.dispatchPI);
+router.post("/:id/return", requireAuth, controller.returnPI);
 router.post("/:id/suggest-revisit", requireAuth, controller.suggestRevisit);
 router.put("/:id/revisit", requireAuth, controller.revisitPI);
 router.put("/:id/payment", requireAuth, controller.updatePaymentStatus);

@@ -57,6 +57,7 @@ module.exports = (sequelize, DataTypes) => {
           "DISPATCHED",
           "EXPIRED",
           "CANCELLED",
+          "RETURNED",
         ),
         defaultValue: "PENDING_APPROVAL",
       },
@@ -128,6 +129,16 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.STRING,
         allowNull: true,
         comment: "Shipping address (can differ from billing address). Admin can manually enter for each PI",
+      },
+      return_reason: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: "Reason for returning the PI/stock",
+      },
+      returned_at: {
+        type: DataTypes.DATE,
+        allowNull: true,
+        comment: "Timestamp when the stock was marked as returned",
       },
     },
     {
