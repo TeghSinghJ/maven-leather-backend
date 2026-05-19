@@ -16,7 +16,7 @@ exports.createBatch = async (req, res) => {
   });
 
   try {
-    const { batch_no, product_id, collection_series_id, description } = req.body;
+    const { batch_no, product_id, collection_series_id, description, hides } = req.body;
 
     if (!batch_no || !product_id || !collection_series_id) {
       throw new Error("batch_no, product_id, and collection_series_id are required");
@@ -48,12 +48,38 @@ exports.createBatch = async (req, res) => {
       { transaction: t }
     );
 
+    // Create hides if provided
+    let createdHides = [];
+    if (hides && Array.isArray(hides) && hides.length > 0) {
+      createdHides = await Promise.all(
+        hides.map((hide, index) =>
+          LeatherHideStock.create(
+            {
+              product_id,
+              batch_id: batch.id,
+              batch_no,
+              hide_id: `${batch_no}-${index + 1}`,
+              qty: hide.size_sqft,
+              grade: hide.quality_grade || "A",
+              status: "AVAILABLE",
+            },
+            { transaction: t }
+          )
+        )
+      );
+    }
+
     await t.commit();
-    res.status(201).json({ message: "Batch created successfully", batch });
+
+    res.status(201).json({
+      message: "Batch created successfully",
+      batch,
+      hides: createdHides,
+    });
   } catch (err) {
     await t.rollback();
-    console.error("Create Batch Error:", err);
-    res.status(400).json({ error: err.message });
+    console.error("Create batch error:", err);
+    res.status(500).json({ error: err.message });
   }
 };
 
@@ -81,7 +107,7 @@ exports.getBatches = async (req, res) => {
         {
           model: LeatherHideStock,
           as: "hides",
-          attributes: ["id", "hide_id", "qty", "hide_code", "grade", "status"],
+          attributes: ["id", "hide_id", "qty", "hide_code", "grade", "hide_number", "remarks", "status"],
         },
       ],
       order: [["createdAt", "DESC"]],
@@ -97,6 +123,7 @@ exports.getBatches = async (req, res) => {
 exports.getBatchById = async (req, res) => {
   try {
     const { id } = req.params;
+    const { showAll } = req.query; // Add query param to optionally show all hides
 
     const batch = await Batch.findByPk(id, {
       include: [
@@ -113,7 +140,9 @@ exports.getBatchById = async (req, res) => {
         {
           model: LeatherHideStock,
           as: "hides",
-          attributes: ["id", "hide_id", "qty", "hide_code", "grade", "remarks", "status"],
+          where: showAll ? {} : { status: "AVAILABLE" }, // Filter to AVAILABLE only unless showAll=true
+          attributes: ["id", "hide_id", "qty", "hide_code", "grade", "hide_number", "remarks", "status"],
+          required: false,
         },
       ],
     });
@@ -505,3 +534,60 @@ exports.getBatchStats = async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 };
+
+// ============================================
+// MARK HIDE AS SOLD/RESERVED (QR Code Scan)
+// ============================================
+
+/**
+ * Mark a hide as RESERVED when sold/assigned to customer
+ * Called when hide QR code is scanned during PI dispatch or customer assignment
+ */
+exports.markHideAsSold = async (req, res) => {
+  const t = await sequelize.transaction({
+    isolationLevel: Transaction.ISOLATION_LEVELS.READ_COMMITTED,
+  });
+
+  try {
+    const { hide_id } = req.params;
+    const { status = "RESERVED", remarks } = req.body;
+
+    if (!["RESERVED", "BLOCKED"].includes(status)) {
+      throw new Error("Invalid status. Must be RESERVED or BLOCKED");
+    }
+
+    const hide = await LeatherHideStock.findByPk(hide_id, {
+      transaction: t,
+      lock: t.LOCK.UPDATE,
+    });
+
+    if (!hide) throw new Error("Hide not found");
+
+    if (hide.status !== "AVAILABLE") {
+      throw new Error(`Hide is already ${hide.status} and cannot be updated`);
+    }
+
+    // Update hide status
+    hide.status = status;
+    if (remarks) hide.remarks = remarks;
+    await hide.save({ transaction: t });
+
+    await t.commit();
+
+    res.json({
+      message: `Hide marked as ${status} successfully`,
+      hide: {
+        id: hide.id,
+        hide_id: hide.hide_id,
+        qty: hide.qty,
+        status: hide.status,
+        remarks: hide.remarks,
+      },
+    });
+  } catch (err) {
+    await t.rollback();
+    console.error("Mark Hide as Sold Error:", err);
+    res.status(400).json({ error: err.message });
+  }
+};
+

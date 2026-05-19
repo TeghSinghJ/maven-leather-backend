@@ -52,18 +52,28 @@ exports.createProduct = [
 exports.addStock = async (req, res) => {
   const transaction = await sequelize.transaction();
   try {
-    const { qty } = req.body;
+    const { qty, location } = req.body;
     if (!qty || qty <= 0) return res.status(400).json({ error: "Quantity must be positive" });
 
-    const stock = await LeatherStock.findOne({
-      where: { product_id: req.params.id },
+    const stockLocation = location || "Bangalore";
+
+    let stock = await LeatherStock.findOne({
+      where: { product_id: req.params.id, location: stockLocation },
       transaction,
       lock: transaction.LOCK.UPDATE,
     });
 
     if (!stock) {
-      await transaction.rollback();
-      return res.status(404).json({ error: "Stock not found" });
+      stock = await LeatherStock.create(
+        {
+          product_id: req.params.id,
+          location: stockLocation,
+          total_qty: 0,
+          available_qty: 0,
+          reserved_qty: 0,
+        },
+        { transaction }
+      );
     }
 
     stock.total_qty += qty;
@@ -106,9 +116,9 @@ exports.getProducts = async (req, res) => {
       whereClause.collection_series_id = { [Op.in]: seriesIds.length ? seriesIds : [0] };
     }
 
-    // Get location from query params, default to Bangalore
-    const location = req.query.location || 'Bangalore';
-    const stockWhereClause = { location };
+    // Get location from query params; if not present, include any stock row
+    const location = req.query.location;
+    const stockWhereClause = location ? { location } : {};
 
     const products = await LeatherProduct.findAll({
       where: whereClause,
@@ -118,7 +128,7 @@ exports.getProducts = async (req, res) => {
           as: "stock",
           where: stockWhereClause,
           attributes: ["total_qty", "available_qty", "reserved_qty", "location"],
-          required: false, // LEFT JOIN to include products even if no stock for this location
+          required: false, // LEFT JOIN to include products even if no stock rows
         },
         {
           model: CollectionSeries,
@@ -409,6 +419,81 @@ exports.getCollectionDetails = async (req, res) => {
     });
   } catch (error) {
     console.error("getCollectionDetails error:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+// Bulk add stock by collection series
+exports.bulkAddStockByCollection = async (req, res) => {
+  try {
+    const { collection_series_id, qty, location } = req.body;
+
+    if (!collection_series_id || qty == null) {
+      return res.status(400).json({ message: "collection_series_id and qty are required" });
+    }
+
+    // Get the series to determine location if not provided
+    const series = await CollectionSeries.findByPk(collection_series_id);
+    if (!series) {
+      return res.status(404).json({ message: "Collection series not found" });
+    }
+
+    const stockLocation = location || series.location || 'Bangalore';
+
+    // Find all products in this collection series
+    const products = await LeatherProduct.findAll({
+      where: { collection_series_id, status: 'ACTIVE' },
+      attributes: ['id', 'leather_code', 'color'],
+    });
+
+    if (!products.length) {
+      return res.status(404).json({ message: "No active products found in this collection series" });
+    }
+
+    const transaction = await sequelize.transaction();
+    let updatedCount = 0;
+
+    try {
+      for (const product of products) {
+        // Check if stock exists for this product and location
+        let stock = await LeatherStock.findOne({
+          where: { product_id: product.id, location: stockLocation },
+          transaction,
+        });
+
+        if (stock) {
+          // Update existing stock
+          stock.total_qty += qty;
+          stock.available_qty += qty;
+          await stock.save({ transaction });
+        } else {
+          // Create new stock entry
+          await LeatherStock.create({
+            product_id: product.id,
+            total_qty: qty,
+            available_qty: qty,
+            reserved_qty: 0,
+            location: stockLocation,
+          }, { transaction });
+        }
+        updatedCount++;
+      }
+
+      await transaction.commit();
+
+      res.json({
+        message: `Stock added successfully to ${updatedCount} products in collection series`,
+        collection_series_id,
+        qty_added: qty,
+        location: stockLocation,
+        products_updated: updatedCount,
+      });
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    }
+  } catch (error) {
+    console.error("bulkAddStockByCollection error:", error);
     res.status(500).json({ error: error.message });
   }
 };

@@ -39,6 +39,7 @@ router.delete("/:id", requireAuth, requireAdmin, controller.deleteBatch);
 router.post("/:batch_id/hides", requireAuth, requireAdmin, controller.addHide);
 router.put("/hides/:hide_id", requireAuth, requireAdmin, controller.updateHide);
 router.delete("/hides/:hide_id", requireAuth, requireAdmin, controller.deleteHide);
+router.put("/hides/:hide_id/mark-sold", requireAuth, controller.markHideAsSold); // QR scan endpoint
 
 // Bulk upload route
 router.post(

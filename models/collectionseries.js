@@ -4,6 +4,11 @@ module.exports = (sequelize, DataTypes) => {
     {
       name: DataTypes.STRING,
       sub_collection_id: DataTypes.INTEGER,
+      location: {
+        type: DataTypes.ENUM('Bangalore', 'Delhi', 'Mumbai'),
+        defaultValue: 'Bangalore',
+        comment: 'Location/branch for this collection series (Bangalore, Delhi, Mumbai)',
+      },
     },
     {
       tableName: "collection_series",

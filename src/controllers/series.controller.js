@@ -35,8 +35,13 @@ exports.remove = async (req, res) => {
 
 exports.getSeriesBySubCollection = async (req, res) => {
   try {
+    const where = { sub_collection_id: req.params.subId };
+    if (req.query.location) {
+      where.location = req.query.location;
+    }
+
     const data = await CollectionSeries.findAll({
-      where: { sub_collection_id: req.params.subId },
+      where,
       order: [["name", "ASC"]],
     });
     res.json(data);

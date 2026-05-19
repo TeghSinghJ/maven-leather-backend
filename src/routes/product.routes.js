@@ -6,6 +6,7 @@ const bulkUploadController = require("../controllers/bulkUpload.controller");
 
 router.post("/", upload.single("image"), controller.createProduct);
 router.patch("/:id/stock", controller.addStock);
+router.post("/bulk-add-stock-by-collection", controller.bulkAddStockByCollection);
 router.post(
   "/bulk-upload",
     upload.single("file"),   

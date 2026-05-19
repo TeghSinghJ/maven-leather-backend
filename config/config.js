@@ -7,7 +7,11 @@
       database: process.env.DB_NAME,
       host: process.env.DB_HOST,
       dialect: process.env.DB_DIALECT || "mysql",
-      port: process.env.DB_PORT
+      port: process.env.DB_PORT,
+      define: {
+        underscored: false,
+        timestamps: true,
+      }
     },
     test: {
       username: process.env.DB_USER,
@@ -15,7 +19,11 @@
       database: "database_test",
       host: process.env.DB_HOST,
       dialect: "mysql",
-      port: process.env.DB_PORT
+      port: process.env.DB_PORT,
+      define: {
+        underscored: false,
+        timestamps: true,
+      }
     },
     production: {
       username: process.env.DB_USER,
@@ -23,6 +31,10 @@
       database: process.env.DB_NAME,
       host: process.env.DB_HOST,
       dialect: "mysql",
-      port: process.env.DB_PORT
+      port: process.env.DB_PORT,
+      define: {
+        underscored: false,
+        timestamps: true,
+      }
     }
   };

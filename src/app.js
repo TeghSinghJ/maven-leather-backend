@@ -3,6 +3,7 @@ const express = require("express");
 const cors = require("cors");
 const productRoutes = require("./routes/product.routes");
 const piRoutes = require("./routes/pi.routes");
+const inventoryRoutes = require("./routes/inventory.routes");
 const app = express();
 
 // // Configure CORS based on environment
@@ -31,6 +32,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use("/api/products", productRoutes);
 app.use("/uploads", express.static("uploads"));
 app.use("/api/pi", piRoutes);
+app.use("/api/inventory", inventoryRoutes);
 app.use("/api/collections", require("./routes/collection.routes"));
 app.use("/api/sub-collections", require("./routes/subCollection.routes"));
 app.use("/api/series", require("./routes/series.routes"));
