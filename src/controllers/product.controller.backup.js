@@ -7,7 +7,6 @@ exports.createProduct = [
   body("leather_code").notEmpty().withMessage("Leather code is required"),
   body("color").notEmpty().withMessage("Color is required"),
   body("initial_qty").optional().isFloat({ min: 0 }).withMessage("Initial quantity must be a positive number"),
-  body("location").optional().isIn(['Bangalore', 'Delhi', 'Mumbai']).withMessage("Invalid location"),
 
   async (req, res) => {
     const errors = validationResult(req);
@@ -18,83 +17,53 @@ exports.createProduct = [
 
     const transaction = await sequelize.transaction();
     try {
-      const { collection_series_id, leather_code, color, description, initial_qty = 0, location = 'Bangalore' } = req.body;
-      console.log("Creating product with data:", { collection_series_id, leather_code, color, description, initial_qty, location });
+      const { collection_series_id, leather_code, color, description, initial_qty = 0 } = req.body;
+      console.log("Creating product with data:", { collection_series_id, leather_code, color, description, initial_qty });
       
       const image_url = req.file ? `/uploads/${req.file.filename}` : null;
 
-      // Check if product already exists (by leather_code + color combination)
-      let product = await LeatherProduct.findOne({
-        where: { 
+      const product = await LeatherProduct.create(
+        {
+          collection_series_id: parseInt(collection_series_id),
           leather_code,
           color,
-          collection_series_id: parseInt(collection_series_id)
+          description,
+          image_url,
+          status: "ACTIVE",
         },
-        transaction
-      });
+        { transaction }
+      );
 
-      if (!product) {
-        // Create new product only if it doesn't exist
-        product = await LeatherProduct.create(
-          {
-            collection_series_id: parseInt(collection_series_id),
-            leather_code,
-            color,
-            description,
-            image_url,
-            status: "ACTIVE",
-          },
-          { transaction }
-        );
-        console.log("New product created:", product.id);
-      } else {
-        console.log("Product already exists with ID:", product.id);
-      }
-
-      // Always create stock for the specified location
-      const existingStock = await LeatherStock.findOne({
-        where: {
+      await LeatherStock.create(
+        {
           product_id: product.id,
-          location
+          total_qty: parseFloat(initial_qty),
+          available_qty: parseFloat(initial_qty),
+          reserved_qty: 0,
+          location: "Bangalore",
         },
-        transaction
-      });
-
-      if (existingStock) {
-        // Update existing stock for this location
-        await existingStock.update(
-          {
-            total_qty: existingStock.total_qty + parseFloat(initial_qty),
-            available_qty: existingStock.available_qty + parseFloat(initial_qty),
-          },
-          { transaction }
-        );
-        console.log(`Stock updated for location ${location}`);
-      } else {
-        // Create new stock for this location
-        await LeatherStock.create(
-          {
-            product_id: product.id,
-            total_qty: parseFloat(initial_qty),
-            available_qty: parseFloat(initial_qty),
-            reserved_qty: 0,
-            location,
-          },
-          { transaction }
-        );
-        console.log(`Stock created for location ${location}`);
-      }
+        { transaction }
+      );
 
       await transaction.commit();
 
-      res.status(201).json({ message: "Product and stock saved successfully", product });
+      console.log("Product created successfully:", product.id);
+      res.status(201).json({ message: "Leather product created successfully", product });
     } catch (error) {
       await transaction.rollback();
       console.error("createProduct error:", error);
       
+      // Handle unique constraint violation
+      if (error.name === 'SequelizeUniqueConstraintError') {
+        return res.status(409).json({ 
+          error: `Product with leather code "${leather_code}" and color "${color}" already exists in this series`
+        });
+      }
+      
       res.status(400).json({ 
         error: error.message,
         details: error.errors ? error.errors.map(e => e.message) : null,
+        stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
       });
     }
   },

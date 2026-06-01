@@ -7,7 +7,7 @@ const {
 
 exports.create = async (req, res) => {
   try {
-    const { collection_series_id, price_type, price } = req.body;
+    const { collection_series_id, price_type, price, price_list } = req.body;
 
     if (!collection_series_id || !price_type || price == null) {
       return res.status(400).json({ message: "Missing required fields" });
@@ -17,6 +17,7 @@ exports.create = async (req, res) => {
       collection_series_id,
       price_type,
       price,
+      price_list: price_list || 'MARVIN', // Default to Marvin if not specified
     });
 
     res.status(201).json(priceEntry);
@@ -27,7 +28,15 @@ exports.create = async (req, res) => {
 };
 
 exports.list = async (req, res) => {
+  const whereClause = {};
+  
+  // Support filtering by price_list
+  if (req.query.price_list) {
+    whereClause.price_list = req.query.price_list.toUpperCase();
+  }
+
   const prices = await CollectionPrice.findAll({
+    where: whereClause,
     include: [
       {
         model: CollectionSeries,
@@ -95,7 +104,8 @@ exports.getById = async (req, res) => {
 
 exports.update = async (req, res) => {
   try {
-    const { price, price_type, collection_series_id, is_active } = req.body;
+    const { price, price_type, collection_series_id, is_active, price_list } =
+      req.body;
 
     const priceRecord = await CollectionPrice.findByPk(req.params.id);
 
@@ -108,6 +118,7 @@ exports.update = async (req, res) => {
       price_type,
       collection_series_id,
       is_active,
+      price_list: price_list || 'MARVIN',
     });
 
     res.json(priceRecord);

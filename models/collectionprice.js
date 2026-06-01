@@ -21,8 +21,12 @@ module.exports = (sequelize, DataTypes) => {
       is_active: {
         type: DataTypes.BOOLEAN,
         defaultValue: true,
-      },
-    },
+      },      price_list: {
+        type: DataTypes.ENUM('WESTERN', 'MARVIN'),
+        allowNull: true,
+        defaultValue: 'MARVIN',
+        comment: 'Brand-specific price list',
+      },    },
     {
       tableName: "collection_prices",
     },

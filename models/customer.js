@@ -18,6 +18,12 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.ENUM('ACTIVE', 'INACTIVE'),
         defaultValue: 'ACTIVE',
       },
+      price_list: {
+        type: DataTypes.ENUM('WESTERN', 'MARVIN'),
+        allowNull: true,
+        defaultValue: 'WESTERN',
+        comment: 'Brand-specific price list',
+      },
     },
     {
       tableName: 'customers',

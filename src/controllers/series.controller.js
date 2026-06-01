@@ -1,8 +1,13 @@
 const { CollectionSeries } = require("../../models");
 
 exports.create = async (req, res) => {
-  const data = await CollectionSeries.create(req.body);
-  res.status(201).json(data);
+  try {
+    const data = await CollectionSeries.create(req.body);
+    res.status(201).json(data);
+  } catch (error) {
+    console.error("series.create error:", error);
+    res.status(400).json({ error: error.message });
+  }
 };
 
 exports.findAll = async (req, res) => {
@@ -21,10 +26,15 @@ exports.findOne = async (req, res) => {
 };
 
 exports.update = async (req, res) => {
-  const [updated] = await CollectionSeries.update(req.body, {
-    where: { id: req.params.id },
-  });
-  res.json({ updated });
+  try {
+    const [updated] = await CollectionSeries.update(req.body, {
+      where: { id: req.params.id },
+    });
+    res.json({ updated });
+  } catch (error) {
+    console.error("series.update error:", error);
+    res.status(400).json({ error: error.message });
+  }
 };
 
 exports.remove = async (req, res) => {
