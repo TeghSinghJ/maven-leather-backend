@@ -251,8 +251,7 @@ module.exports = function generateExactPIPdf(res, pi) {
   let subtotal = 0;
 
   const transportCharge = Number(pi.transport_amount || 0);
-  const transportGstPercent = 5;
-  const transportGst = transportCharge > 0 ? (transportCharge * transportGstPercent / 100) : 0;
+  const perforationCharge = Number(pi.perforation_amount || 0);
 
   doc.font("Helvetica").fontSize(9);
 
@@ -331,11 +330,11 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   doc.font("Helvetica-Bold").fontSize(9).text("Total", xDesc + 2, y + 3);
   doc.font("Helvetica-Bold").text(`${pi.total_qty?.toFixed(2) || (pi.items[0]?.qty || 0).toFixed(2)} ${isVitton ? "MTR" : "SQF"}`, xQty + 2, y + 3, { width: colWidths.qty, align: "center" });
-  doc.text((subtotal + transportCharge).toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
+  doc.text((subtotal + transportCharge + perforationCharge).toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
 
   y += rowHeight;
 
-  const taxableValue = subtotal + transportCharge;
+  const taxableValue = subtotal + transportCharge + perforationCharge;
 
   const cgstItems = sameState ? taxableValue * PI_CONST.CGST / 100 : 0;
   const sgstItems = sameState ? taxableValue * PI_CONST.SGST / 100 : 0;
@@ -360,7 +359,13 @@ module.exports = function generateExactPIPdf(res, pi) {
     y += 15;
   }
 
-if (sameState) {
+  if (perforationCharge > 0) {
+    doc.text("Perforation Charges", 400, y);
+    doc.text(`${perforationCharge.toFixed(2)}`, 520, y, { align: "right" });
+    y += 15;
+  }
+
+  if (sameState) {
   doc.text(`CGST ${PI_CONST.CGST}%`, 400, y);
   doc.text(cgstItems.toFixed(2), 520, y, { align: "right" });
   y += 15;

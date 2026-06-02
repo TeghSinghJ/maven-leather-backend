@@ -17,6 +17,7 @@ const {
 const { Op, Transaction } = require("sequelize");
 const { COMPANY, COMPANY_LIST } = require("../constants/company.constants");
 const generateExactPIPdf = require('../utils/piPdf');
+const { recalculateLeatherStock } = require("../services/leatherStock.service");
 
 const parseBatchInfo = (batchInfo) => {
   if (Array.isArray(batchInfo)) return batchInfo;
@@ -572,6 +573,7 @@ exports.cancelPI = async (req, res) => {
       await stock.save({ transaction: t });
     }
 
+    const hideProductIds = new Set();
     for (const item of pi.items) {
       let batches = [];
       if (Array.isArray(item.batch_info)) batches = item.batch_info;
@@ -599,7 +601,12 @@ exports.cancelPI = async (req, res) => {
         hideStock.qty += b.qty;
         hideStock.status = "AVAILABLE";
         await hideStock.save({ transaction: t });
+        if (hideStock.product_id) hideProductIds.add(hideStock.product_id);
       }
+    }
+
+    for (const productId of hideProductIds) {
+      await recalculateLeatherStock(productId);
     }
 
     pi.status = "CANCELLED";
@@ -625,6 +632,9 @@ exports.downloadPI = async (req, res) => {
         "createdAt",
         "transport_amount",
         "transport_payment_status",
+        "perforation_qty",
+        "perforation_amount",
+        "perforation_payment_status",
         "delivery_address",
         "billing_address",
         "shipping_address",
@@ -683,6 +693,11 @@ exports.downloadPI = async (req, res) => {
     }
 
     const piData = pi.toJSON();
+    console.log("DOWNLOAD PI DATA:", {
+      id: piData.id,
+      perforation_qty: piData.perforation_qty,
+      perforation_amount: piData.perforation_amount,
+    });
     if (piData.customer) {
       piData.customer_name = piData.customer.customer_name || "";
       piData.company_name = piData.company_name || COMPANY.MARVIN;
@@ -1728,6 +1743,10 @@ exports.adminApprovePI = async (req, res) => {
       shipping_address,
       transport_type_id,
       transport_id,
+      transport_amount,
+      perforation_qty,
+      perforation_amount,
+      perforation_payment_status,
       hasUpdatedItems: !!updated_items,
       hasManualPrices: !!manual_item_prices,
       hasSurcharges: !!item_surcharges,
@@ -1909,6 +1928,15 @@ exports.adminApprovePI = async (req, res) => {
       },
       { transaction: t },
     );
+
+    // Reload and log persisted perforation values for debugging
+    await pi.reload({ transaction: t });
+    console.log("PI persisted perforation:", {
+      id: pi.id,
+      perforation_qty: pi.perforation_qty,
+      perforation_amount: pi.perforation_amount,
+      transport_amount: pi.transport_amount,
+    });
 
     await t.commit();
     res.json({

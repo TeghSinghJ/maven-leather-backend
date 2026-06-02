@@ -29,6 +29,19 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Simple request logger for PI endpoints to surface approve/download actions in terminal
+app.use((req, res, next) => {
+  try {
+    if (req.path && req.path.startsWith("/api/pi")) {
+      const shortBody = req.method === "GET" ? "" : JSON.stringify(req.body || {});
+      console.log("[REQ]", req.method, req.path, shortBody);
+    }
+  } catch (e) {
+    // ignore logging errors
+  }
+  next();
+});
+
 app.use("/api/products", productRoutes);
 app.use("/uploads", express.static("uploads"));
 app.use("/api/pi", piRoutes);
