@@ -1,4 +1,5 @@
 const XLSX = require("xlsx");
+const { Op } = require("sequelize");
 const { LeatherProduct, LeatherStock } = require("../../models");
 const { sequelize } = require("../../models");
 
@@ -46,20 +47,39 @@ exports.bulkUpload = async (req, res) => {
         transaction,
       });
 
-      // ✅ Create / update stock
-      const [stock] = await LeatherStock.findOrCreate({
-        where: { product_id: product.id },
-        defaults: {
-          total_qty: 0,
-          available_qty: 0,
-          reserved_qty: 0,
-        },
+      const stockLocation = req.body.location || 'Bangalore';
+      // ✅ Create / update stock using product_id + location to avoid duplicate stock rows
+      let stock = await LeatherStock.findOne({
+        where: { product_id: product.id, location: stockLocation },
         transaction,
       });
 
-      stock.total_qty += quantity;
-      stock.available_qty += quantity;
-      await stock.save({ transaction });
+      if (!stock) {
+        stock = await LeatherStock.findOne({
+          where: {
+            product_id: product.id,
+            location: { [Op.is]: null },
+          },
+          transaction,
+        });
+      }
+
+      if (stock) {
+        stock.total_qty += quantity;
+        stock.available_qty += quantity;
+        await stock.save({ transaction });
+      } else {
+        stock = await LeatherStock.create(
+          {
+            product_id: product.id,
+            location: stockLocation,
+            total_qty: quantity,
+            available_qty: quantity,
+            reserved_qty: 0,
+          },
+          { transaction }
+        );
+      }
     }
 
     await transaction.commit();

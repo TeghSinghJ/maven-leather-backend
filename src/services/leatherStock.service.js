@@ -21,12 +21,25 @@ const recalculateLeatherStock = async (productId) => {
     }
   }
 
-  await LeatherStock.upsert({
-    product_id: productId,
-    total_qty,
-    available_qty,
-    reserved_qty,
+  // Preserve an existing location if one already exists for this product.
+  let stock = await LeatherStock.findOne({
+    where: { product_id: productId },
   });
+
+  if (stock) {
+    stock.total_qty = total_qty;
+    stock.available_qty = available_qty;
+    stock.reserved_qty = reserved_qty;
+    await stock.save();
+  } else {
+    await LeatherStock.create({
+      product_id: productId,
+      total_qty,
+      available_qty,
+      reserved_qty,
+      location: 'Bangalore',
+    });
+  }
 };
 
 module.exports = { recalculateLeatherStock };

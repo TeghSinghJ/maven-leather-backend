@@ -154,6 +154,14 @@ exports.addStock = async (req, res) => {
 
 exports.getProducts = async (req, res) => {
   try {
+    // DEBUG: Log incoming request
+    console.log('🔍 getProducts called with params:', {
+      location: req.query.location,
+      collection_id: req.query.collection_id,
+      collection_series_id: req.query.collection_series_id,
+      price_list: req.query.price_list,
+    });
+
     const whereClause = {
       status: "ACTIVE",
     };
@@ -179,9 +187,11 @@ exports.getProducts = async (req, res) => {
       whereClause.collection_series_id = { [Op.in]: seriesIds.length ? seriesIds : [0] };
     }
 
-    // Get location from query params; if not present, include any stock row
+    // Get location from query params
     const location = req.query.location;
     const stockWhereClause = location ? { location } : {};
+    // When location is specified, use LEFT JOIN so products without stock in that location still appear with zero values
+    const stockRequired = false;
 
     const products = await LeatherProduct.findAll({
       where: whereClause,
@@ -191,7 +201,7 @@ exports.getProducts = async (req, res) => {
           as: "stock",
           where: stockWhereClause,
           attributes: ["total_qty", "available_qty", "reserved_qty", "location"],
-          required: false, // LEFT JOIN to include products even if no stock rows
+          required: stockRequired,
         },
         {
           model: CollectionSeries,
@@ -216,8 +226,25 @@ exports.getProducts = async (req, res) => {
 
     if (!products.length) return res.json([]);
 
+    // CRITICAL FIX: Deduplicate products by ID to handle multiple stock rows
+    // (This shouldn't happen with required:true + location filter, but we ensure it here)
+    const seenProductIds = new Set();
+    const deduplicatedProducts = products.filter(prod => {
+      if (seenProductIds.has(prod.id)) {
+        console.warn(`⚠️  DUPLICATE PRODUCT DETECTED: ${prod.leather_code} (ID: ${prod.id})`);
+        return false; // Skip duplicate
+      }
+      seenProductIds.add(prod.id);
+      return true;
+    });
+
+    console.log(`📊 Query returned ${products.length} products, ${deduplicatedProducts.length} after deduplication`);
+    if (products.length > deduplicatedProducts.length) {
+      console.warn(`⚠️  Found ${products.length - deduplicatedProducts.length} duplicate products!`);
+    }
+
     // Load prices for all products
-    const seriesIds = [...new Set(products.map(p => p.collection_series_id))];
+    const seriesIds = [...new Set(deduplicatedProducts.map(p => p.collection_series_id))];
     
     // Support price_list filtering (WESTERN or MARVIN)
     const priceListFilter = req.query.price_list || 'MARVIN';
@@ -238,14 +265,16 @@ exports.getProducts = async (req, res) => {
       priceMap[p.collection_series_id][p.price_type] = p.price;
     });
 
-    const result = products.map(prod => {
+    const result = deduplicatedProducts.map(prod => {
       const p = prod.get({ plain: true });
+      // Handle stock being an array (shouldn't happen with limit: 1, but fallback just in case)
+      const stock = Array.isArray(p.stock) ? p.stock[0] : p.stock;
       return {
         ...p,
-        available_qty: p.stock?.available_qty || 0,
-        total_qty: p.stock?.total_qty || 0,
-        reserved_qty: p.stock?.reserved_qty || 0,
-        location: p.stock?.location || location,
+        available_qty: stock?.available_qty || 0,
+        total_qty: stock?.total_qty || 0,
+        reserved_qty: stock?.reserved_qty || 0,
+        location: stock?.location || location || 'Bangalore',
         main_collection_name: p.series?.subCollection?.mainCollection?.name || null,
         quantity_price: {
           DP: priceMap[p.collection_series_id]?.DP || 0,
@@ -254,6 +283,8 @@ exports.getProducts = async (req, res) => {
         },
       };
     });
+    console.log(`✅ Returning ${result.length} products for location: ${location || 'ALL'}`);
+    console.log(`📋 Products returned: ${result.map(r => r.leather_code).join(', ')}`);
     res.json(result);
   } catch (error) {
     console.error("getProducts error:", error);
@@ -432,7 +463,7 @@ exports.getCollectionDetails = async (req, res) => {
 
     const seriesIds = seriesData.map(s => s.id);
 
-    // Step 2: Get all products (colors) for these series
+    // Step 2: Get all products (colors) for these series with location-filtered stock
     const products = await LeatherProduct.findAll({
       where: {
         collection_series_id: { [Op.in]: seriesIds },
@@ -444,7 +475,7 @@ exports.getCollectionDetails = async (req, res) => {
           as: 'stock',
           attributes: ['total_qty', 'available_qty', 'reserved_qty', 'location'],
           where: { location },
-          required: false,
+          required: true, // INNER JOIN to only get products with stock in this location
         },
         {
           model: LeatherHideStock,
@@ -459,10 +490,22 @@ exports.getCollectionDetails = async (req, res) => {
       order: [['color', 'ASC']],
     });
 
+    // CRITICAL FIX: Deduplicate products by ID to handle multiple stock rows
+    const seenProductIds = new Set();
+    const deduplicatedProducts = products.filter(prod => {
+      if (seenProductIds.has(prod.id)) {
+        return false; // Skip duplicate
+      }
+      seenProductIds.add(prod.id);
+      return true;
+    });
+
     // Step 3: Format the response
-    const colors = products.map(product => {
+    const colors = deduplicatedProducts.map(product => {
       const plain = product.get({ plain: true });
       const batches = plain.batches || [];
+      // Handle stock being an array (shouldn't happen with required:true, but fallback just in case)
+      const stock = Array.isArray(plain.stock) ? plain.stock[0] : plain.stock;
       
       return {
         id: plain.id,
@@ -470,10 +513,10 @@ exports.getCollectionDetails = async (req, res) => {
         leather_code: plain.leather_code,
         description: plain.description,
         image_url: plain.image_url,
-        total_qty: plain.stock?.total_qty || 0,
-        available_qty: plain.stock?.available_qty || 0,
-        reserved_qty: plain.stock?.reserved_qty || 0,
-        location: plain.stock?.location || location,
+        total_qty: stock?.total_qty || 0,
+        available_qty: stock?.available_qty || 0,
+        reserved_qty: stock?.reserved_qty || 0,
+        location: stock?.location || location,
         hides: batches.map(batch => ({
           id: batch.id,
           hide_code: batch.hide_code,
