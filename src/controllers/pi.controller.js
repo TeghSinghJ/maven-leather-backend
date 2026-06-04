@@ -20,6 +20,26 @@ const { COMPANY, COMPANY_LIST } = require("../constants/company.constants");
 const generateExactPIPdf = require('../utils/piPdf');
 const { recalculateLeatherStock } = require("../services/leatherStock.service");
 
+const safeSetHideReassignmentRequired = async (pi, transaction) => {
+  if (!pi) return;
+
+  try {
+    await pi.update(
+      { hide_reassignment_required: true },
+      { transaction },
+    );
+  } catch (err) {
+    const message = err?.original?.sqlMessage || err?.message || "";
+    if (message.includes("Unknown column 'hide_reassignment_required'") || message.includes('Unknown column') || message.includes('hide_reassignment_required')) {
+      console.warn(
+        'Skipping hide_reassignment_required update because the database column does not exist.',
+      );
+      return;
+    }
+    throw err;
+  }
+};
+
 const parseBatchInfo = (batchInfo) => {
   if (Array.isArray(batchInfo)) return batchInfo;
   if (typeof batchInfo === "string") {
@@ -117,10 +137,7 @@ const reassignReservedHidesFromOtherOrders = async (
 
       const previousPi = item.pi;
       if (previousPi) {
-        await previousPi.update(
-          { hide_reassignment_required: true },
-          { transaction },
-        );
+        await safeSetHideReassignmentRequired(previousPi, transaction);
       }
 
       await HideReassignmentLog.create(
@@ -207,10 +224,7 @@ const unlockReservedHide = async (
 
     const previousPi = item.pi;
     if (previousPi) {
-      await previousPi.update(
-        { hide_reassignment_required: true },
-        { transaction },
-      );
+      await safeSetHideReassignmentRequired(previousPi, transaction);
       fromPiIds.add(previousPi.id);
     }
   }
