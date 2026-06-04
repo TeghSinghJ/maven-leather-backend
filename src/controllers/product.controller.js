@@ -7,7 +7,7 @@ exports.createProduct = [
   body("leather_code").notEmpty().withMessage("Leather code is required"),
   body("color").notEmpty().withMessage("Color is required"),
   body("initial_qty").optional().isFloat({ min: 0 }).withMessage("Initial quantity must be a positive number"),
-  body("location").optional().isIn(['Bangalore', 'Delhi', 'Mumbai']).withMessage("Invalid location"),
+  body("location").optional().isIn(['Bangalore', 'Delhi', 'Mumbai', 'Western Colours', 'Italy']).withMessage("Invalid location"),
 
   async (req, res) => {
     const errors = validationResult(req);
@@ -109,7 +109,7 @@ exports.addStock = async (req, res) => {
     if (!qty || qty <= 0) return res.status(400).json({ error: "Quantity must be positive" });
     
     // Validate location if provided
-    const validLocations = ['Bangalore', 'Delhi', 'Mumbai'];
+    const validLocations = ['Bangalore', 'Delhi', 'Mumbai', 'Western Colours', 'Italy'];
     const stockLocation = location || "Bangalore";
     if (!validLocations.includes(stockLocation)) {
       return res.status(400).json({ error: `Invalid location. Must be one of: ${validLocations.join(', ')}` });

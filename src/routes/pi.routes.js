@@ -18,6 +18,7 @@ router.get("/sales", requireAuth, controller.getSalesData);
 
 // Admin-only stock management routes
 router.put("/hide-stock/:id", requireAuth, requireAdmin, controller.adminUpdateHideStock);
+router.post("/hides/:hideId/unlock", requireAuth, requireAdmin, controller.unlockHideStock);
 router.put("/leather-stock/:id", requireAuth, requireAdmin, controller.adminUpdateLeatherStock);
 router.put("/batch/:id", requireAuth, requireAdmin, controller.adminUpdateBatch);
 router.put("/:piId/items/:itemId", requireAuth, requireAdmin, controller.updatePIItem);

@@ -140,6 +140,12 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: true,
         comment: "Timestamp when the stock was marked as returned",
       },
+      hide_reassignment_required: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+        comment: "Flag for PIs that need hide reassignment after a reserved hide is reassigned",
+      },
     },
     {
       sequelize,

@@ -4,9 +4,9 @@
 module.exports = {
   async up (queryInterface, Sequelize) {
     await queryInterface.addColumn('collection_series', 'location', {
-      type: Sequelize.ENUM('Bangalore', 'Delhi', 'Mumbai'),
+      type: Sequelize.ENUM('Bangalore', 'Delhi', 'Mumbai', 'Western Colours', 'Italy'),
       defaultValue: 'Bangalore',
-      comment: 'Location/branch for this collection series (Bangalore, Delhi, Mumbai)',
+      comment: 'Location/branch for this collection series (Bangalore, Delhi, Mumbai, Western Colours, Italy)',
     });
   },
 

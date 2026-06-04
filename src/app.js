@@ -4,6 +4,7 @@ const cors = require("cors");
 const productRoutes = require("./routes/product.routes");
 const piRoutes = require("./routes/pi.routes");
 const inventoryRoutes = require("./routes/inventory.routes");
+const { recalculateLeatherStock } = require("./services/leatherStock.service");
 const app = express();
 
 // // Configure CORS based on environment
@@ -95,15 +96,18 @@ cron.schedule('0 0 * * *', async () => { // Run daily at midnight
 
     for (const pi of oldPIs) {
       // Restore stock logic (similar to cancelPI)
-      const productIds = pi.items.map(i => i.product_id);
+      const productIds = [...new Set(pi.items.map((i) => i.product_id))];
       const stocks = await LeatherStock.findAll({ where: { product_id: { [Op.in]: productIds } }, transaction: t, lock: t.LOCK.UPDATE });
       const stockMap = {};
-      stocks.forEach(s => (stockMap[s.product_id] = s));
+      stocks.forEach((s) => (stockMap[s.product_id] = s));
+      const hideProductIds = new Set();
+
       for (const item of pi.items) {
+        const qtyToRestore = Number(item.qty) || 0;
         const stock = stockMap[item.product_id];
         if (!stock) continue;
-        stock.available_qty += item.qty;
-        stock.reserved_qty -= item.qty;
+        stock.available_qty += qtyToRestore;
+        stock.reserved_qty -= qtyToRestore;
         if (stock.reserved_qty < 0) stock.reserved_qty = 0;
         await stock.save({ transaction: t });
       }
@@ -117,13 +121,27 @@ cron.schedule('0 0 * * *', async () => { // Run daily at midnight
 
         for (const b of batches) {
           if (!b.hide_id) continue;
-          const hideStock = await LeatherHideStock.findOne({ where: { hide_id: b.hide_id }, transaction: t, lock: t.LOCK.UPDATE });
+          let hideStock = await LeatherHideStock.findOne({ where: { hide_id: b.hide_id, batch_no: b.batch_no }, transaction: t, lock: t.LOCK.UPDATE });
+          if (!hideStock && b.hide_id) {
+            hideStock = await LeatherHideStock.findOne({ where: { hide_id: b.hide_id }, transaction: t, lock: t.LOCK.UPDATE });
+            if (hideStock) {
+              console.warn(
+                `Auto-cancel: HideStock found by hide_id fallback (hide_id=${b.hide_id}, batch_no=${b.batch_no})`,
+              );
+            }
+          }
           if (hideStock) {
-            hideStock.qty += b.qty;
+            const batchQty = Number(b.qty) || 0;
+            hideStock.qty += batchQty;
             hideStock.status = "AVAILABLE";
             await hideStock.save({ transaction: t });
+            if (hideStock.product_id) hideProductIds.add(hideStock.product_id);
           }
         }
+      }
+
+      for (const productId of new Set([...productIds, ...hideProductIds])) {
+        await recalculateLeatherStock(productId);
       }
 
       pi.status = 'CANCELLED';

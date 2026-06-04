@@ -3,7 +3,7 @@
 module.exports = {
   up: async (queryInterface, Sequelize) => {
     await queryInterface.addColumn('leather_folds', 'location', {
-      type: Sequelize.ENUM('Bangalore', 'Delhi', 'Mumbai'),
+      type: Sequelize.ENUM('Bangalore', 'Delhi', 'Mumbai', 'Western Colours', 'Italy'),
       defaultValue: 'Bangalore',
       comment: 'Collection location/branch',
       allowNull: false,

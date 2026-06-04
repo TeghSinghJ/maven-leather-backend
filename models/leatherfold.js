@@ -39,7 +39,7 @@ module.exports = (sequelize, DataTypes) => {
         defaultValue: 'ACTIVE',
       },
       location: {
-        type: DataTypes.ENUM('Bangalore', 'Delhi', 'Mumbai'),
+        type: DataTypes.ENUM('Bangalore', 'Delhi', 'Mumbai', 'Western Colours', 'Italy'),
         defaultValue: 'Bangalore',
         comment: 'Collection location/branch',
       },

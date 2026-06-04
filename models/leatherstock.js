@@ -7,9 +7,9 @@ module.exports = (sequelize, DataTypes) => {
       available_qty: DataTypes.FLOAT,
       reserved_qty: DataTypes.FLOAT,
       location: {
-        type: DataTypes.ENUM('Bangalore', 'Delhi', 'Mumbai'),
+        type: DataTypes.ENUM('Bangalore', 'Delhi', 'Mumbai', 'Western Colours', 'Italy'),
         defaultValue: 'Bangalore',
-        comment: 'Stock location/branch (Bangalore, Delhi, Mumbai)',
+        comment: 'Stock location/branch (Bangalore, Delhi, Mumbai, Western Colours, Italy)',
       },
       estimated_delivery_date: {
         type: DataTypes.DATE,

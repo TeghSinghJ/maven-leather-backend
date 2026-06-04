@@ -4,6 +4,7 @@ const {
   PIItem,
   CollectionPrice,
   LeatherHideStock,
+  HideReassignmentLog,
   Customer,
   TransportType,
   Transport,
@@ -29,6 +30,209 @@ const parseBatchInfo = (batchInfo) => {
     }
   }
   return [];
+};
+
+const collectReservedHideIdsInPendingOrders = async (
+  productId,
+  excludePiId = null,
+) => {
+  const where = { product_id: Number(productId) };
+  if (excludePiId) {
+    where.pi_id = { [Op.ne]: Number(excludePiId) };
+  }
+
+  const pendingItems = await PIItem.findAll({
+    where,
+    include: [
+      {
+        model: ProformaInvoice,
+        as: "pi",
+        where: { status: "PENDING_APPROVAL" },
+        attributes: ["id"],
+      },
+    ],
+  });
+
+  const hideIds = new Set();
+  for (const item of pendingItems) {
+    const batchInfo = parseBatchInfo(item.batch_info);
+    for (const batch of batchInfo) {
+      if (batch.hide_id) hideIds.add(batch.hide_id);
+    }
+  }
+
+  return Array.from(hideIds);
+};
+
+const reassignReservedHidesFromOtherOrders = async (
+  targetPiId,
+  productId,
+  hideIds,
+  userId,
+  transaction,
+) => {
+  const result = [];
+  if (!Array.isArray(hideIds) || hideIds.length === 0) return result;
+
+  const pendingItems = await PIItem.findAll({
+    where: {
+      product_id: Number(productId),
+      pi_id: { [Op.ne]: Number(targetPiId) },
+    },
+    include: [
+      {
+        model: ProformaInvoice,
+        as: "pi",
+        where: { status: "PENDING_APPROVAL" },
+        attributes: ["id"],
+      },
+    ],
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+
+  for (const hideId of hideIds) {
+    const itemsToReassign = pendingItems.filter((item) => {
+      const oldBatchInfo = parseBatchInfo(item.batch_info);
+      return oldBatchInfo.some((b) => b.hide_id === hideId);
+    });
+
+    for (const item of itemsToReassign) {
+      const oldBatchInfo = parseBatchInfo(item.batch_info);
+      const updatedBatchInfo = oldBatchInfo.filter(
+        (batch) => batch.hide_id !== hideId,
+      );
+      const updatedQty = updatedBatchInfo.reduce(
+        (sum, batch) => sum + Number(batch.qty || 0),
+        0,
+      );
+
+      await item.update(
+        {
+          batch_info: updatedBatchInfo,
+          qty: updatedQty,
+        },
+        { transaction },
+      );
+
+      const previousPi = item.pi;
+      if (previousPi) {
+        await previousPi.update(
+          { hide_reassignment_required: true },
+          { transaction },
+        );
+      }
+
+      await HideReassignmentLog.create(
+        {
+          from_pi_id: previousPi?.id || null,
+          to_pi_id: targetPiId,
+          user_id: userId || null,
+          hide_id: hideId,
+          action: "REASSIGNED",
+          note: `Hide ${hideId} reassigned from PI ${previousPi?.id} to PI ${targetPiId}`,
+        },
+        { transaction },
+      );
+
+      result.push({
+        hide_id: hideId,
+        from_pi_id: previousPi?.id || null,
+        from_item_id: item.id,
+      });
+    }
+  }
+
+  return result;
+};
+
+const unlockReservedHide = async (
+  hideStockId,
+  targetPiId,
+  userId,
+  transaction,
+) => {
+  const hideStock = await LeatherHideStock.findByPk(hideStockId, {
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+
+  if (!hideStock) {
+    throw new Error("Hide stock not found");
+  }
+
+  if (hideStock.status !== "RESERVED") {
+    throw new Error("Only RESERVED hides can be unlocked");
+  }
+
+  const pendingItems = await PIItem.findAll({
+    where: {
+      product_id: hideStock.product_id,
+      pi_id: { [Op.ne]: Number(targetPiId) },
+    },
+    include: [
+      {
+        model: ProformaInvoice,
+        as: "pi",
+        where: { status: "PENDING_APPROVAL" },
+        attributes: ["id"],
+      },
+    ],
+    transaction,
+    lock: transaction.LOCK.UPDATE,
+  });
+
+  const fromPiIds = new Set();
+
+  for (const item of pendingItems) {
+    const oldBatchInfo = parseBatchInfo(item.batch_info);
+    if (!oldBatchInfo.some((batch) => batch.hide_id === hideStock.hide_id))
+      continue;
+
+    const updatedBatchInfo = oldBatchInfo.filter(
+      (batch) => batch.hide_id !== hideStock.hide_id,
+    );
+    const updatedQty = updatedBatchInfo.reduce(
+      (sum, batch) => sum + Number(batch.qty || 0),
+      0,
+    );
+
+    await item.update(
+      {
+        batch_info: updatedBatchInfo,
+        qty: updatedQty,
+      },
+      { transaction },
+    );
+
+    const previousPi = item.pi;
+    if (previousPi) {
+      await previousPi.update(
+        { hide_reassignment_required: true },
+        { transaction },
+      );
+      fromPiIds.add(previousPi.id);
+    }
+  }
+
+  hideStock.status = "AVAILABLE";
+  await hideStock.save({ transaction });
+
+  for (const fromPiId of Array.from(fromPiIds)) {
+    await HideReassignmentLog.create(
+      {
+        from_pi_id: fromPiId,
+        to_pi_id: Number(targetPiId),
+        user_id: userId || null,
+        hide_id: hideStock.hide_id,
+        action: "UNLOCKED",
+        note: `Hide ${hideStock.hide_id} unlocked from PI ${fromPiId} for PI ${targetPiId}`,
+      },
+      { transaction },
+    );
+  }
+
+  return hideStock;
 };
 
 const blockHideStockBatchItems = async (pi, transaction) => {
@@ -363,6 +567,7 @@ exports.getPIs = async (req, res) => {
         "company_name",
         "created_by",
         "status",
+        "hide_reassignment_required",
         "invoice_bill_number",
         "confirmed_at",
         "dispatched_at",
@@ -556,25 +761,30 @@ exports.cancelPI = async (req, res) => {
         `PI can only be cancelled if it is PENDING_APPROVAL, ACTIVE, or CONFIRMED. Current status: ${pi.status}`,
       );
 
-    const productIds = pi.items.map((i) => i.product_id);
+    const productIds = new Set(pi.items.map((i) => i.product_id));
+
     const stocks = await LeatherStock.findAll({
-      where: { product_id: { [Op.in]: productIds } },
+      where: { product_id: { [Op.in]: Array.from(productIds) } },
       transaction: t,
       lock: t.LOCK.UPDATE,
     });
     const stockMap = {};
-    stocks.forEach((s) => (stockMap[s.product_id] = s));
-    for (const item of pi.items) {
-      const stock = stockMap[item.product_id];
-      if (!stock) continue;
-      stock.available_qty += item.qty;
-      stock.reserved_qty -= item.qty;
-      if (stock.reserved_qty < 0) stock.reserved_qty = 0;
-      await stock.save({ transaction: t });
-    }
+    stocks.forEach((s) => {
+      if (!stockMap[s.product_id]) stockMap[s.product_id] = [];
+      stockMap[s.product_id].push(s);
+    });
 
     const hideProductIds = new Set();
     for (const item of pi.items) {
+      const qtyToRestore = Number(item.qty) || 0;
+      const leatherStockRows = stockMap[item.product_id] || [];
+      for (const stock of leatherStockRows) {
+        stock.available_qty += qtyToRestore;
+        stock.reserved_qty -= qtyToRestore;
+        if (stock.reserved_qty < 0) stock.reserved_qty = 0;
+        await stock.save({ transaction: t });
+      }
+
       let batches = [];
       if (Array.isArray(item.batch_info)) batches = item.batch_info;
       else if (typeof item.batch_info === "string") {
@@ -587,25 +797,47 @@ exports.cancelPI = async (req, res) => {
 
       for (const b of batches) {
         if (!b.hide_id) continue;
-        const hideStock = await LeatherHideStock.findOne({
-          where: { hide_id: b.hide_id },
+        let hideStock = await LeatherHideStock.findOne({
+          where: {
+            hide_id: b.hide_id,
+            batch_no: b.batch_no,
+            product_id: item.product_id,
+          },
           transaction: t,
           lock: t.LOCK.UPDATE,
         });
+
+        if (!hideStock && b.hide_id) {
+          hideStock = await LeatherHideStock.findOne({
+            where: {
+              hide_id: b.hide_id,
+              product_id: item.product_id,
+            },
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+          });
+          if (hideStock) {
+            console.warn(
+              `HideStock found by hide_id fallback while cancelling PI (hide_id=${b.hide_id}, batch_no=${b.batch_no}, product_id=${item.product_id})`,
+            );
+          }
+        }
+
         if (!hideStock) {
           console.warn(
-            `HideStock not found while cancelling PI (hide_id=${b.hide_id}), skipping hide stock restoration`,
+            `HideStock not found while cancelling PI (hide_id=${b.hide_id}, batch_no=${b.batch_no}, product_id=${item.product_id}), skipping hide stock restoration`,
           );
           continue;
         }
-        hideStock.qty += b.qty;
+        const batchQty = Number(b.qty) || 0;
+        hideStock.qty += batchQty;
         hideStock.status = "AVAILABLE";
         await hideStock.save({ transaction: t });
         if (hideStock.product_id) hideProductIds.add(hideStock.product_id);
       }
     }
 
-    for (const productId of hideProductIds) {
+    for (const productId of new Set([...productIds, ...hideProductIds])) {
       await recalculateLeatherStock(productId);
     }
 
@@ -1514,16 +1746,24 @@ exports.createPIConfirmed = async (req, res) => {
   });
 
   try {
-    const { customer_id, items, price_type, company_name } = req.body;
+    const { customer_id, items, price_type, company_name, price_list } = req.body;
+    const normalizedPriceType = String(price_type || "").trim().toUpperCase();
+    const normalizedPriceList = String(price_list || "").trim().toUpperCase();
 
     if (!customer_id) throw new Error("customer_id required");
-    if (!price_type) throw new Error("price_type required");
+    if (!normalizedPriceType) throw new Error("price_type required");
+    if (!["DP", "RRP", "ARCH"].includes(normalizedPriceType))
+      throw new Error("Invalid price_type: " + price_type);
     if (!Array.isArray(items) || items.length === 0)
       throw new Error("No items provided");
     const company = company_name || COMPANY.MARVIN;
+    const priceList = normalizedPriceList || company;
 
     if (!COMPANY_LIST.includes(company)) {
       throw new Error("Invalid company_name");
+    }
+    if (!COMPANY_LIST.includes(priceList)) {
+      throw new Error("Invalid price_list: " + price_list);
     }
 
     // 1️⃣ Create PI
@@ -1543,6 +1783,11 @@ exports.createPIConfirmed = async (req, res) => {
     let allVitton = true;
     for (const item of items) {
       const { product_id, batch_no, hides, collection_series_id, requested_qty } = item;
+      if (!collection_series_id) {
+        throw new Error(
+          `collection_series_id required for product ${product_id} batch ${batch_no}`,
+        );
+      }
 
       if (!Array.isArray(hides) || hides.length === 0) {
         throw new Error(
@@ -1673,13 +1918,17 @@ exports.createPIConfirmed = async (req, res) => {
       const price = await CollectionPrice.findOne({
         where: {
           collection_series_id,
-          price_type,
+          price_type: normalizedPriceType,
           is_active: true,
+          price_list: priceList,
         },
         transaction: t,
       });
 
-      if (!price) throw new Error(`Price not found for ${price_type}`);
+      if (!price)
+        throw new Error(
+          `Price not found for ${normalizedPriceType} (collection_series_id=${collection_series_id}, price_list=${priceList})`,
+        );
 
       // 6️⃣ Create PI Item
       await PIItem.create(
@@ -1955,7 +2204,7 @@ exports.adminApprovePI = async (req, res) => {
  */
 exports.listAvailableHidesForReallocation = async (req, res) => {
   try {
-    const { product_id, search, page = 1, limit = 50 } = req.query;
+    const { product_id, search, page = 1, limit = 50, exclude_pi_id } = req.query;
     
     if (!product_id) {
       return res.status(400).json({ error: "product_id is required" });
@@ -1964,7 +2213,7 @@ exports.listAvailableHidesForReallocation = async (req, res) => {
     const where = {
       product_id: Number(product_id),
       status: "AVAILABLE",
-      qty: { [Op.gt]: 0 }
+      qty: { [Op.gt]: 0 },
     };
 
     // Add search filter if provided
@@ -1976,7 +2225,7 @@ exports.listAvailableHidesForReallocation = async (req, res) => {
 
     const hides = await LeatherHideStock.findAll({
       where,
-      attributes: ["id", "hide_id", "qty", "batch_no", "batch_id", "createdAt"],
+      attributes: ["id", "product_id", "hide_id", "qty", "batch_no", "batch_id", "createdAt"],
       include: [
         {
           model: LeatherProduct,
@@ -2001,10 +2250,63 @@ exports.listAvailableHidesForReallocation = async (req, res) => {
       offset: offset,
     });
 
+    const reservedHideIds = await collectReservedHideIdsInPendingOrders(
+      product_id,
+      exclude_pi_id,
+    );
+
+    const lockedHides = reservedHideIds.length
+      ? await LeatherHideStock.findAll({
+          where: {
+            product_id: Number(product_id),
+            status: "RESERVED",
+            [Op.and]: [
+              { hide_id: { [Op.in]: reservedHideIds } },
+              ...(search && search.trim()
+                ? [{ hide_id: { [Op.iLike]: `%${search.trim()}%` } }]
+                : []),
+            ],
+          },
+          attributes: ["id", "product_id", "hide_id", "qty", "batch_no", "batch_id", "createdAt"],
+          include: [
+            {
+              model: LeatherProduct,
+              as: "product",
+              attributes: ["leather_code", "color"],
+            },
+            {
+              model: Batch,
+              as: "batch",
+              attributes: ["batch_no", "collection_series_id"],
+              include: [
+                {
+                  model: CollectionSeries,
+                  as: "series",
+                  attributes: ["id", "name"],
+                }
+              ]
+            }
+          ],
+          order: [["qty", "DESC"], ["createdAt", "ASC"]],
+        })
+      : [];
+
     const total = await LeatherHideStock.count({ where });
 
     res.json({
-      hides: hides.map(h => ({
+      hides: hides.map((h) => ({
+        id: h.id,
+        product_id: h.product_id,
+        hide_id: h.hide_id,
+        qty: h.qty,
+        batch_no: h.batch_no,
+        leather_code: h.product?.leather_code,
+        color: h.product?.color,
+        collection_series_id: h.batch?.collection_series_id || null,
+        collection_name: h.batch?.series?.name || "N/A",
+        created_at: h.createdAt,
+      })),
+      locked_hides: lockedHides.map((h) => ({
         id: h.id,
         hide_id: h.hide_id,
         qty: h.qty,
@@ -2020,11 +2322,46 @@ exports.listAvailableHidesForReallocation = async (req, res) => {
         limit: Number(limit),
         total,
         totalPages: Math.ceil(total / Number(limit)),
-      }
+      },
     });
   } catch (err) {
     console.error("listAvailableHidesForReallocation error:", err);
     res.status(500).json({ error: err.message });
+  }
+};
+
+exports.unlockHideStock = async (req, res) => {
+  const t = await sequelize.transaction();
+  try {
+    const { hideId } = req.params;
+    const { target_pi_id } = req.body;
+
+    if (!target_pi_id) {
+      throw new Error("target_pi_id is required to unlock a hide");
+    }
+
+    const hideStock = await unlockReservedHide(
+      hideId,
+      target_pi_id,
+      req.user?.id,
+      t,
+    );
+
+    await t.commit();
+
+    res.json({
+      message: "Hide unlocked successfully",
+      hide: {
+        id: hideStock.id,
+        hide_id: hideStock.hide_id,
+        status: hideStock.status,
+        batch_no: hideStock.batch_no,
+      },
+    });
+  } catch (err) {
+    await t.rollback();
+    console.error("unlockHideStock error:", err);
+    res.status(400).json({ error: err.message });
   }
 };
 
@@ -2103,8 +2440,8 @@ exports.adminUpdateLeatherStock = async (req, res) => {
     }
 
     // Validate location
-    if (location && !["Bangalore", "Delhi", "Mumbai"].includes(location)) {
-      throw new Error("Invalid location. Must be Bangalore, Delhi, or Mumbai");
+    if (location && !["Bangalore", "Delhi", "Mumbai", "Western Colours", "Italy"].includes(location)) {
+      throw new Error("Invalid location. Must be Bangalore, Delhi, Mumbai, Western Colours, or Italy");
     }
 
     // Update leather stock
@@ -2316,6 +2653,7 @@ exports.updatePIItem = async (req, res) => {
         console.log(`    ✓ Found in DB. Current status: ${hideStock.status}`);
         if (hideStock.status === "RESERVED") {
           hideStock.status = "AVAILABLE";
+          hideStock.updated_by_admin = true;
           await hideStock.save({ transaction: t });
           console.log(`    ✓ Released! Status: RESERVED → AVAILABLE`);
         } else {
@@ -2324,6 +2662,21 @@ exports.updatePIItem = async (req, res) => {
       } else {
         console.log(`    ✗ Hide not found in leather_hide_stocks!`);
       }
+    }
+
+    // Reassign reserved hides selected from other pending orders to this PI
+    const reservedHideIds = updatedBatchInfo
+      .map((b) => b.hide_id)
+      .filter(Boolean);
+    const reassignments = await reassignReservedHidesFromOtherOrders(
+      piId,
+      item.product_id,
+      reservedHideIds,
+      req.user?.id,
+      t,
+    );
+    if (reassignments.length > 0) {
+      console.log("🔁 Reassigned hides from other pending orders:", reassignments);
     }
 
     // Update the PI item with new batch info
@@ -2388,6 +2741,7 @@ exports.updatePIItem = async (req, res) => {
       item: freshItem,
       hides_released: hideIDsToRelease,
       hides_blocked: hideIDsToBlock,
+      reassigned_hides: reassignments || [],
     });
   } catch (err) {
     await t.rollback();

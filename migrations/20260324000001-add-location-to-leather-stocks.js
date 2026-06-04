@@ -3,10 +3,10 @@
 module.exports = {
   async up(queryInterface, Sequelize) {
     await queryInterface.addColumn('leather_stocks', 'location', {
-      type: Sequelize.ENUM('Bangalore', 'Delhi', 'Mumbai'),
+      type: Sequelize.ENUM('Bangalore', 'Delhi', 'Mumbai', 'Western Colours', 'Italy'),
       defaultValue: 'Bangalore',
       allowNull: false,
-      comment: 'Stock location/branch (Bangalore, Delhi, Mumbai)',
+      comment: 'Stock location/branch (Bangalore, Delhi, Mumbai, Western Colours, Italy)',
     });
 
     // Add index for faster queries
