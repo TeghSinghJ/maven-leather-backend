@@ -7,7 +7,7 @@ module.exports = {
       state: "Karnataka",
       stateCode: "29",
       email: "accounts@marvinlifestyle.com",
-      bankName: "Bank of India OD Account",
+      bankName: "Bank of India",
       accountName: "Marvin Lifestyle India Private Limited",
       accountNo: "840930110000045",
       ifsc: "BKID0008409",

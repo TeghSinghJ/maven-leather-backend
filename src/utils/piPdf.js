@@ -45,18 +45,87 @@ module.exports = function generateExactPIPdf(res, pi) {
     address: pi.address
   });
 
-  // Check if it's Vitton collection
-  const isVitton = pi.items.some(item => 
-    item.product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton')
-  );
+  const getItemUnit = (item) => {
+    const collectionName = item.product?.series?.subCollection?.mainCollection?.name;
+    return collectionName?.toLowerCase().includes("vitton") ? "MTR" : "SQF";
+  };
+
+  const getItemHsn = (item) => {
+    return getItemUnit(item) === "MTR" ? "56039400" : "41079100";
+  };
+
+  const getItemQty = (item) => {
+    if (Array.isArray(item.batch_info) && item.batch_info.length > 0) {
+      const batchQty = item.batch_info.reduce((sum, batch) => {
+        const qty = Number(batch.qty);
+        return sum + (Number.isFinite(qty) ? qty : 0);
+      }, 0);
+
+      if (batchQty > 0) return batchQty;
+    }
+
+    const directQty = Number(item.qty);
+    return Number.isFinite(directQty) ? directQty : 0;
+  };
+
+  const getItemDescription = (item) => {
+    const leatherCode = String(item.product?.leather_code || "").trim();
+    const color = String(item.product?.color || "").trim();
+
+    if (!leatherCode && !color) return "-";
+    if (!color) return leatherCode;
+
+    const normalizedCode = leatherCode.toLowerCase();
+    const normalizedColor = color.toLowerCase();
+
+    if (normalizedCode.includes(normalizedColor)) return leatherCode;
+
+    return `${leatherCode} ${color}`.trim();
+  };
+
+  const firstItemUnit = getItemUnit(pi.items[0] || {});
+  const allItemsSameUnit = pi.items.every((item) => getItemUnit(item) === firstItemUnit);
+  const totalUnit = allItemsSameUnit ? firstItemUnit : "MIXED";
+  const totalQty = pi.items.reduce((sum, item) => {
+    const qty = getItemQty(item);
+    return sum + (Number.isFinite(qty) ? qty : 0);
+  }, 0);
+
+  const sanitizeBankName = (name) => {
+    if (!name || typeof name !== "string") return "";
+    return name.replace(/\s*OD\s*Account.*$/i, "").trim();
+  };
+
+  console.log("PI PDF totals:", {
+    pi_id: pi.id,
+    itemCount: pi.items.length,
+    itemQtys: pi.items.map((item) => getItemQty(item)),
+    totalQty,
+    totalUnit,
+  });
 
   const doc = new PDFDocument({
     size: "A4",
     margin: 40
   });
 
+  const safeFileName = String(pi.customer_name || `PI-${pi.id}`)
+    .trim()
+    .replace(/[\\/?:*"<>|]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/\s/g, "_");
+
+  const transportCharge = Number(pi.transport_amount || 0);
+  const perforationQty = Number(pi.perforation_qty || 0);
+  const perforationCharge = Number(
+    pi.perforation_amount || (perforationQty > 0 ? perforationQty * 50 : 0),
+  );
+
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `attachment; filename=PI-${pi.id}.pdf`);
+  res.setHeader("Content-Disposition", `attachment; filename=${safeFileName}.pdf`);
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
 
   doc.pipe(res);
 
@@ -75,6 +144,8 @@ module.exports = function generateExactPIPdf(res, pi) {
     ? PI_CONST.COMPANIES.WESTERN
     : PI_CONST.COMPANIES.MARVIN;
 
+  const displayBankName = sanitizeBankName(company.bankName);
+
   const sameState =
     pi.state?.toLowerCase().trim() ===
     company.state?.toLowerCase().trim();
@@ -82,7 +153,7 @@ module.exports = function generateExactPIPdf(res, pi) {
   let y = 40;
 
   /* ---------- PAGE TITLE ---------- */
-  doc.font("Helvetica-Bold").fontSize(14).text("Proforma Invoice", pageLeft, borderTop - 28, {
+  doc.font("Helvetica-Bold").fontSize(13).text("Proforma Invoice", pageLeft, borderTop - 26, {
     width: contentWidth,
     align: "center",
   });
@@ -90,7 +161,7 @@ module.exports = function generateExactPIPdf(res, pi) {
   /* ---------- HEADER (table-based) ---------- */
   // pageLeft, pageRight, contentWidth already defined in border section above
 
-  const headerHeight = 170;
+  const headerHeight = 150;
   const colAWidth = contentWidth * 0.4;
   const colBWidth = contentWidth * 0.3;
   const colCWidth = contentWidth * 0.3;
@@ -156,7 +227,7 @@ module.exports = function generateExactPIPdf(res, pi) {
     ["Dated", formatDate(pi.createdAt)],
   ].filter(([, value]) => value && String(value).trim() !== "-");
 
-  doc.font("Helvetica-Bold").fontSize(9).text("Dates/Terms", colCX + 4, y + 4);
+  doc.font("Helvetica-Bold").fontSize(8).text("Dates/Terms", colCX + 4, y + 4);
   let rightY = y + 18;
   rightFields.forEach(([label, value]) => {
     doc.font("Helvetica").fontSize(8).text(`${label}:`, colCX + 4, rightY, { continued: true });
@@ -181,22 +252,22 @@ module.exports = function generateExactPIPdf(res, pi) {
   const storeAddress = (addr) => (addr || "").replace(/\n/g, ", ");
 
   /* ---------- PARTY DETAILS ---------- */
-  const partySectionHeight = 200;
+  const partySectionHeight = 180;
   doc.lineWidth(1).rect(pageLeft, y, contentWidth, partySectionHeight).stroke();
   doc.moveTo(pageLeft, y + partySectionHeight / 2).lineTo(pageRight, y + partySectionHeight / 2).stroke();
 
   const pY = y + 6;
   const partyLineHeight = 14;
 
-  doc.font("Helvetica-Bold").fontSize(9).text("Consignee (Ship to)", pageLeft + 4, pY);
-  doc.font("Helvetica").fontSize(8).text(pi.customer_name, pageLeft + 4, pY + partyLineHeight);
+  doc.font("Helvetica-Bold").fontSize(8).text("Consignee (Ship to)", pageLeft + 4, pY);
+  doc.font("Helvetica").fontSize(7).text(pi.customer_name, pageLeft + 4, pY + partyLineHeight);
   doc.text(storeAddress(pi.shipping_address || pi.delivery_address || pi.billing_address), pageLeft + 4, pY + 2 * partyLineHeight, { width: contentWidth - 8 });
   doc.text(`GSTIN/UIN: ${pi.gst_number || "-"}`, pageLeft + 4, pY + 3.5 * partyLineHeight);
   doc.text(`State: ${pi.state || "-"}`, pageLeft + 4, pY + 4.5 * partyLineHeight);
   doc.text(`Contact: ${pi.contact || "-"}`, pageLeft + 4, pY + 5.5 * partyLineHeight);
 
-  doc.font("Helvetica-Bold").fontSize(9).text("Buyer (Bill to)", pageLeft + 4, y + partySectionHeight / 2 + 6);
-  doc.font("Helvetica").fontSize(8).text(pi.customer_name, pageLeft + 4, y + partySectionHeight / 2 + 6 + partyLineHeight);
+  doc.font("Helvetica-Bold").fontSize(8).text("Buyer (Bill to)", pageLeft + 4, y + partySectionHeight / 2 + 6);
+  doc.font("Helvetica").fontSize(7).text(pi.customer_name, pageLeft + 4, y + partySectionHeight / 2 + 6 + partyLineHeight);
   doc.text(storeAddress(pi.billing_address || pi.delivery_address), pageLeft + 4, y + partySectionHeight / 2 + 6 + 2 * partyLineHeight, { width: contentWidth - 8 });
   doc.text(`GSTIN/UIN: ${pi.gst_number || "-"}`, pageLeft + 4, y + partySectionHeight / 2 + 6 + 3.5 * partyLineHeight);
   doc.text(`State: ${pi.state || "-"}`, pageLeft + 4, y + partySectionHeight / 2 + 6 + 4.5 * partyLineHeight);
@@ -207,13 +278,13 @@ module.exports = function generateExactPIPdf(res, pi) {
   /* ---------- ITEMS TABLE ---------- */
   const colWidths = {
     sl: Math.floor(contentWidth * 0.05),
-    desc: Math.floor(contentWidth * 0.35),
+    desc: Math.floor(contentWidth * 0.33),
     hsn: Math.floor(contentWidth * 0.1),
-    qty: Math.floor(contentWidth * 0.1),
-    rate: Math.floor(contentWidth * 0.1),
+    qty: Math.floor(contentWidth * 0.12),
+    rate: Math.floor(contentWidth * 0.09),
     per: Math.floor(contentWidth * 0.05),
     disc: Math.floor(contentWidth * 0.05),
-    amt: Math.floor(contentWidth * 0.2),
+    amt: Math.floor(contentWidth * 0.21),
   };
 
   const xSel = pageLeft;
@@ -226,7 +297,7 @@ module.exports = function generateExactPIPdf(res, pi) {
   const xAmt = xDisc + colWidths.disc;
 
   const tableTop = y;
-  const rowHeight = 18;
+  const rowHeight = 16;
 
   doc.lineWidth(1).rect(pageLeft, tableTop, contentWidth, rowHeight).stroke();
   doc.moveTo(xDesc, tableTop).lineTo(xDesc, tableTop + rowHeight).stroke();
@@ -236,7 +307,7 @@ module.exports = function generateExactPIPdf(res, pi) {
   doc.moveTo(xPer, tableTop).lineTo(xPer, tableTop + rowHeight).stroke();
   doc.moveTo(xDisc, tableTop).lineTo(xDisc, tableTop + rowHeight).stroke();
 
-  doc.font("Helvetica-Bold").fontSize(9);
+  doc.font("Helvetica-Bold").fontSize(8);
   doc.text("Sl No", xSel + 2, y + 4);
   doc.text("Description", xDesc + 2, y + 4);
   doc.text("HSN/SAC", xHsn + 2, y + 4);
@@ -250,18 +321,17 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   let subtotal = 0;
 
-  const transportCharge = Number(pi.transport_amount || 0);
-  const perforationCharge = Number(pi.perforation_amount || 0);
-
-  doc.font("Helvetica").fontSize(9);
+  doc.font("Helvetica").fontSize(8);
 
   pi.items.forEach((item, i) => {
     const rate = item.rate || 0;
-    const qty = item.qty || 0;
+    const qty = getItemQty(item);
     const surcharge = Number(item.surcharge) || 0;
     const lineAmount = rate * qty;
     const amount = lineAmount + surcharge;
     subtotal += amount;
+    const itemUnit = getItemUnit(item);
+    const itemHsn = getItemHsn(item);
 
     doc.lineWidth(0.5).rect(pageLeft, y, contentWidth, rowHeight).stroke();
     doc.moveTo(xDesc, y).lineTo(xDesc, y + rowHeight).stroke();
@@ -272,11 +342,11 @@ module.exports = function generateExactPIPdf(res, pi) {
     doc.moveTo(xDisc, y).lineTo(xDisc, y + rowHeight).stroke();
 
     doc.font("Helvetica").text(String(i + 1), xSel + 2, y + 3);
-    doc.font("Helvetica-Bold").text(`${item.product?.leather_code || ""} ${item.product?.color || ""}`, xDesc + 2, y + 3, { width: colWidths.desc - 4 });
-    doc.font("Helvetica").text(isVitton ? "56039400" : (item.product?.hsn_code || "41079100"), xHsn + 2, y + 3);
-    doc.text(`${qty.toFixed(2)} ${isVitton ? "MTR" : "SQF"}`, xQty + 2, y + 3);
+    doc.font("Helvetica-Bold").text(getItemDescription(item), xDesc + 2, y + 3, { width: colWidths.desc - 4 });
+    doc.font("Helvetica").text(itemHsn, xHsn + 2, y + 3);
+    doc.text(`${qty.toFixed(2)} ${itemUnit}`, xQty + 2, y + 3);
     doc.text(rate.toFixed(2), xRate + 2, y + 3);
-    doc.text(isVitton ? "MTR" : "SQF", xPer + 2, y + 3);
+    doc.text(itemUnit, xPer + 2, y + 3);
     doc.text("-", xDisc + 2, y + 3);
     doc.text(amount.toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
 
@@ -292,7 +362,7 @@ module.exports = function generateExactPIPdf(res, pi) {
       doc.moveTo(xPer, y).lineTo(xPer, y + rowHeight).stroke();
       doc.moveTo(xDisc, y).lineTo(xDisc, y + rowHeight).stroke();
 
-      doc.font("Helvetica").fontSize(8).text("", xSel + 2, y + 3);
+      doc.font("Helvetica").fontSize(7).text("", xSel + 2, y + 3);
       doc.text("(+Additional Charge)", xDesc + 2, y + 3, { width: colWidths.desc - 4 });
       doc.text("", xHsn + 2, y + 3);
       doc.text("", xQty + 2, y + 3);
@@ -300,7 +370,7 @@ module.exports = function generateExactPIPdf(res, pi) {
       doc.text("", xPer + 2, y + 3);
       doc.text("", xDisc + 2, y + 3);
       doc.text(`+${surcharge.toFixed(2)}`, xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
-      doc.font("Helvetica").fontSize(9);
+      doc.font("Helvetica").fontSize(8);
       
       y += rowHeight;
     }
@@ -319,21 +389,6 @@ module.exports = function generateExactPIPdf(res, pi) {
     }
   });
 
-  // bottom totals row for items
-  doc.lineWidth(1).rect(pageLeft, y, contentWidth, rowHeight).stroke();
-  doc.moveTo(xDesc, y).lineTo(xDesc, y + rowHeight).stroke();
-  doc.moveTo(xHsn, y).lineTo(xHsn, y + rowHeight).stroke();
-  doc.moveTo(xQty, y).lineTo(xQty, y + rowHeight).stroke();
-  doc.moveTo(xRate, y).lineTo(xRate, y + rowHeight).stroke();
-  doc.moveTo(xPer, y).lineTo(xPer, y + rowHeight).stroke();
-  doc.moveTo(xDisc, y).lineTo(xDisc, y + rowHeight).stroke();
-
-  doc.font("Helvetica-Bold").fontSize(9).text("Total", xDesc + 2, y + 3);
-  doc.font("Helvetica-Bold").text(`${pi.total_qty?.toFixed(2) || (pi.items[0]?.qty || 0).toFixed(2)} ${isVitton ? "MTR" : "SQF"}`, xQty + 2, y + 3, { width: colWidths.qty, align: "center" });
-  doc.text((subtotal + transportCharge + perforationCharge).toFixed(2), xAmt + 2, y + 3, { width: colWidths.amt - 4, align: "right" });
-
-  y += rowHeight;
-
   const taxableValue = subtotal + transportCharge + perforationCharge;
 
   const cgstItems = sameState ? taxableValue * PI_CONST.CGST / 100 : 0;
@@ -351,7 +406,7 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   doc.font("Helvetica");
 
-  y += 10;  // Move Forwarding Charges down a bit
+  y += 8;  // Move Forwarding Charges down a bit
 
   if (transportCharge > 0) {
     doc.text("Forwarding Charges", 400, y);
@@ -402,7 +457,7 @@ y += 5;
 
   /* ---------- TAX SUMMARY TABLE ---------- */
   
-  const hsnCode = isVitton ? "56039400" : (pi.items[0]?.product?.hsn_code || "41079100");
+  const hsnCode = getItemHsn(pi.items[0] || {});
   const taxRate = sameState ? PI_CONST.CGST + PI_CONST.SGST : PI_CONST.IGST;
   const taxAmount = sameState ? (cgstItems + sgstItems) : igstItems;
   const displayTaxableValue = taxableValue;  // include forwarding in taxable base as requested
@@ -416,7 +471,7 @@ y += 5;
   const taxCol4 = taxCol3 + (taxTableW * 0.2);
   const taxCol5 = taxCol4 + (taxTableW * 0.2);
 
-  const taxRowHeight = 18;
+  const taxRowHeight = 16;
 
   doc.lineWidth(1).rect(taxTableX, taxTableY, taxTableW, taxRowHeight * 2).stroke();
   doc.moveTo(taxCol2, taxTableY).lineTo(taxCol2, taxTableY + taxRowHeight * 2).stroke();
@@ -424,33 +479,33 @@ y += 5;
   doc.moveTo(taxCol4, taxTableY).lineTo(taxCol4, taxTableY + taxRowHeight * 2).stroke();
   doc.moveTo(taxCol5, taxTableY).lineTo(taxCol5, taxTableY + taxRowHeight * 2).stroke();
 
-  doc.font("Helvetica-Bold").fontSize(9)
+  doc.font("Helvetica-Bold").fontSize(8)
     .text("HSN/SAC", taxCol1 + 3, taxTableY + 4)
     .text("Taxable Value", taxCol2 + 3, taxTableY + 4)
     .text("Rate", taxCol3 + 3, taxTableY + 4)
     .text("IGST Amount", taxCol4 + 3, taxTableY + 4)
     .text("Total Tax Amount", taxCol5 + 3, taxTableY + 4);
 
-  doc.font("Helvetica").fontSize(9)
+  doc.font("Helvetica").fontSize(8)
     .text(hsnCode, taxCol1 + 3, taxTableY + taxRowHeight + 4)
     .text(displayTaxableValue.toFixed(2), taxCol2 + 3, taxTableY + taxRowHeight + 4)
     .text(`${taxRate}%`, taxCol3 + 3, taxTableY + taxRowHeight + 4)
     .text(taxAmount.toFixed(2), taxCol4 + 3, taxTableY + taxRowHeight + 4)
     .text(taxAmount.toFixed(2), taxCol5 + 3, taxTableY + taxRowHeight + 4);
 
-  y += taxRowHeight * 2 + 10;
+  y += taxRowHeight * 2 + 8;
 
   /* ---------- AMOUNT IN WORDS ---------- */
-  doc.font("Helvetica").fontSize(9).text("Amount Chargeable (in words)", pageLeft, y);
+  doc.font("Helvetica").fontSize(8).text("Amount Chargeable (in words)", pageLeft, y);
 
   doc
     .font("Helvetica-Bold")
     .text(amountInWords(finalTotal), pageLeft, y + 12);
 
-  y += 35;
+  y += 25;
 
   /* ---------- DECLARATION ---------- */
-  doc.font("Helvetica-Bold").fontSize(9).text("Declaration:", pageLeft, y);
+  doc.font("Helvetica-Bold").fontSize(8).text("Declaration:", pageLeft, y);
   y += 12;
   doc.font("Helvetica").fontSize(8);
   doc.text("Actual quantity delivered may vary by +/- 25 Sq. Ft. or by upto 10% for Bulk Quantities.", pageLeft, y);
@@ -468,8 +523,8 @@ y += 5;
   const footerBlockHeight = 65;
 
   // Left: Bank Details
-  doc.font("Helvetica-Bold").fontSize(9).text("Bank Details", pageLeft + 4, y + 4);
-  doc.font("Helvetica").fontSize(8).text(`Bank Name: ${company.bankName}`, pageLeft + 4, y + 16);
+  doc.font("Helvetica-Bold").fontSize(8).text("Bank Details", pageLeft + 4, y + 4);
+  doc.font("Helvetica").fontSize(7).text(`Bank Name: ${displayBankName}`, pageLeft + 4, y + 16);
   doc.text(`Account Name: ${company.accountName || company.name}`, pageLeft + 4, y + 26);
   doc.text(`Account Number: ${company.accountNo}`, pageLeft + 4, y + 36);
   doc.text(`Branch: ${company.branch}`, pageLeft + 4, y + 46);
@@ -479,7 +534,7 @@ y += 5;
   const rightColX = pageLeft + Math.floor(contentWidth * 0.6) + 4;
   const rightColWidth = Math.floor(contentWidth * 0.4) - 8;
   const rightColCenter = rightColX + (rightColWidth / 2);
-  doc.font("Helvetica-Bold").fontSize(9).text(company.signature, rightColCenter - 40, y + 10, { align: "center", width: 80 });
+  doc.font("Helvetica-Bold").fontSize(8).text(company.signature, rightColCenter - 40, y + 10, { align: "center", width: 80 });
 
   // Add company seal if available
   const sealPath = path.resolve(__dirname, `../../assets/${isWestern ? 'western-seal.png' : 'marvin-seal.png'}`);

@@ -13,6 +13,7 @@ const {
   SubCollection,
   MainCollection,
   Batch,
+  User,
   sequelize,
 } = require("../../models");
 const { Op, Transaction } = require("sequelize");
@@ -50,6 +51,69 @@ const parseBatchInfo = (batchInfo) => {
     }
   }
   return [];
+};
+
+const SALES_LOCATION_PRIORITY = [
+  { label: "Bangalore", tokens: ["bangalore", "bengaluru"] },
+  { label: "Hyderabad", tokens: ["hyderabad"] },
+  { label: "Mumbai", tokens: ["mumbai"] },
+  { label: "Delhi", tokens: ["delhi", "new delhi", "ncr"] },
+  { label: "Gujarat", tokens: ["gujarat", "ahmedabad", "surat", "vadodara", "rajkot"] },
+  { label: "Karnataka", tokens: ["karnataka"] },
+  { label: "Maharashtra", tokens: ["maharashtra"] },
+  { label: "Telangana", tokens: ["telangana"] },
+  { label: "Tamil Nadu", tokens: ["tamil nadu", "chennai"] },
+  { label: "Kerala", tokens: ["kerala", "kochi", "cochin"] },
+  { label: "Rajasthan", tokens: ["rajasthan", "jaipur"] },
+  { label: "Punjab", tokens: ["punjab", "ludhiana"] },
+  { label: "Andhra Pradesh", tokens: ["andhra pradesh", "vizag", "visakhapatnam"] },
+];
+
+const normalizeText = (value) => String(value || "").toLowerCase();
+
+const inferLocationLabel = (pi) => {
+  const searchText = normalizeText(
+    [
+      pi.customer?.state,
+      pi.customer?.address,
+      pi.shipping_address,
+      pi.billing_address,
+      pi.delivery_address,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+
+  for (const entry of SALES_LOCATION_PRIORITY) {
+    if (entry.tokens.some((token) => searchText.includes(token))) {
+      return entry.label;
+    }
+  }
+
+  return pi.customer?.state || "Unknown";
+};
+
+const matchesLocationFilter = (pi, location) => {
+  if (!location) return true;
+  const locationText = normalizeText(location);
+  const searchText = normalizeText(
+    [
+      pi.customer?.state,
+      pi.customer?.address,
+      pi.shipping_address,
+      pi.billing_address,
+      pi.delivery_address,
+    ]
+      .filter(Boolean)
+      .join(" "),
+  );
+
+  return searchText.includes(locationText) || normalizeText(inferLocationLabel(pi)) === locationText;
+};
+
+const toDayKey = (dateValue) => {
+  if (!dateValue) return "Unknown";
+  return new Date(dateValue).toISOString().slice(0, 10);
 };
 
 const collectReservedHideIdsInPendingOrders = async (
@@ -400,6 +464,9 @@ exports.createPI = async (req, res) => {
       transport_id,
       weight_kg,
       transport_payment_status,
+      perforation_qty,
+      perforation_amount,
+      perforation_payment_status,
     } = req.body;
 
     console.log("CREATE PI REQUEST:", {
@@ -423,6 +490,11 @@ exports.createPI = async (req, res) => {
       transportAmount = weight_kg * Number(transportType.base_price);
     }
 
+    const perforationQtyValue = Number(perforation_qty || 0);
+    const perforationAmountValue = Number(
+      perforation_amount || (perforationQtyValue > 0 ? perforationQtyValue * 50 : 0),
+    );
+
     // 🔐 RBAC: Set PI creator and location
     const pi = await ProformaInvoice.create(
       {
@@ -436,6 +508,9 @@ exports.createPI = async (req, res) => {
         weight_kg,
         transport_payment_status,
         transport_amount: transportAmount,
+        perforation_qty: perforationQtyValue,
+        perforation_amount: perforationAmountValue,
+        perforation_payment_status,
         status: "ACTIVE",
         expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
@@ -851,7 +926,10 @@ exports.cancelPI = async (req, res) => {
       }
     }
 
-    for (const productId of new Set([...productIds, ...hideProductIds])) {
+    // Only recalculate leather stock for products whose hide allocations changed.
+    // Vitton roll allocations are restored directly on LeatherStock and should not
+    // be overwritten by hide-based stock recalculation.
+    for (const productId of hideProductIds) {
       await recalculateLeatherStock(productId);
     }
 
@@ -966,6 +1044,9 @@ exports.downloadPI = async (req, res) => {
     piData.billing_address = piData.billing_address || piData.address || "";
     piData.shipping_address = piData.shipping_address || piData.delivery_address || piData.address || "";
     piData.delivery_address = piData.delivery_address || piData.address || "";
+    piData.perforation_amount = Number(
+      piData.perforation_amount || (Number(piData.perforation_qty || 0) > 0 ? 50 : 0),
+    );
     
     return generateExactPIPdf(res, piData);
   } catch (err) {
@@ -1760,7 +1841,16 @@ exports.createPIConfirmed = async (req, res) => {
   });
 
   try {
-    const { customer_id, items, price_type, company_name, price_list } = req.body;
+    const {
+      customer_id,
+      items,
+      price_type,
+      company_name,
+      price_list,
+      perforation_qty,
+      perforation_amount,
+      perforation_payment_status,
+    } = req.body;
     const normalizedPriceType = String(price_type || "").trim().toUpperCase();
     const normalizedPriceList = String(price_list || "").trim().toUpperCase();
 
@@ -1787,6 +1877,11 @@ exports.createPIConfirmed = async (req, res) => {
         customer_id,
         company_name: company,
         created_by: req.user.id,
+        perforation_qty: Number(perforation_qty || 0),
+        perforation_amount: Number(
+          perforation_amount || (Number(perforation_qty || 0) > 0 ? Number(perforation_qty || 0) * 50 : 0),
+        ),
+        perforation_payment_status,
         status: "PENDING_APPROVAL",
         expires_at: new Date(Date.now() + 7 * 86400000),
       },
@@ -1862,6 +1957,7 @@ exports.createPIConfirmed = async (req, res) => {
         // Update stock for Vitton
         const stock = await LeatherStock.findOne({
           where: { product_id },
+          order: [['available_qty', 'DESC']],
           transaction: t,
           lock: t.LOCK.UPDATE,
         });
@@ -2171,6 +2267,12 @@ exports.adminApprovePI = async (req, res) => {
       await blockHideStockBatchItems(pi, t);
     }
 
+    const nextTransportAmount = transport_amount ?? pi.transport_amount ?? 0;
+    const nextPerforationQty = perforation_qty ?? pi.perforation_qty ?? 0;
+    const nextPerforationAmount =
+      perforation_amount ??
+      (Number(nextPerforationQty) > 0 ? Number(nextPerforationQty) * 50 : pi.perforation_amount ?? 0);
+
     await pi.update(
       {
         transport_type_id,
@@ -2182,10 +2284,10 @@ exports.adminApprovePI = async (req, res) => {
         billing_address,
         shipping_address,
         receiver_courier_name,
-        transport_amount: transport_amount || 0,
-        perforation_qty: perforation_qty || 0,
-        perforation_amount: perforation_amount || 0,
-        perforation_payment_status,
+        transport_amount: nextTransportAmount,
+        perforation_qty: nextPerforationQty,
+        perforation_amount: nextPerforationAmount,
+        perforation_payment_status: perforation_payment_status ?? pi.perforation_payment_status,
         status: "ACTIVE",
         confirmed_at: new Date(),
       },
@@ -2980,33 +3082,49 @@ exports.getPendingApprovalPIs = async (req, res) => {
 
 exports.getSalesData = async (req, res) => {
   try {
-    const { period = '7d' } = req.query;
+    const { period = "7d", company = "ALL", location = "" } = req.query;
     const today = new Date();
     const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 1);
 
     let days = 7;
     let periodLabel = 'Last 7 Days';
-    if (period === '15d') {
+    if (period === '1d' || period === 'day' || period === 'today') {
+      days = 1;
+      periodLabel = 'Today';
+    } else if (period === '15d') {
       days = 15;
       periodLabel = 'Last 15 Days';
-    } else if (period === '1m') {
+    } else if (period === '1m' || period === 'month') {
       days = 30;
       periodLabel = 'Last 30 Days';
+    } else if (period === '7d' || period === 'week') {
+      days = 7;
+      periodLabel = 'Last 7 Days';
     }
 
     const startOfDay = new Date(endOfDay);
     startOfDay.setDate(startOfDay.getDate() - days);
 
-    const rangePIs = await ProformaInvoice.findAll({
-      where: {
-        createdAt: {
-          [Op.gte]: startOfDay,
-          [Op.lt]: endOfDay,
-        },
-        status: {
-          [Op.ne]: 'CANCELLED',
-        },
+    const piWhere = {
+      createdAt: {
+        [Op.gte]: startOfDay,
+        [Op.lt]: endOfDay,
       },
+      status: {
+        [Op.ne]: 'CANCELLED',
+      },
+    };
+
+    if (company && company !== 'ALL') {
+      piWhere.company_name = company;
+    }
+
+    if (req.user?.role === 'BUSINESS_EXECUTIVE') {
+      piWhere.created_by = req.user.id;
+    }
+
+    const rangePIs = await ProformaInvoice.findAll({
+      where: piWhere,
       include: [
         {
           model: PIItem,
@@ -3022,31 +3140,43 @@ exports.getSalesData = async (req, res) => {
         {
           model: Customer,
           as: 'customer',
-          attributes: ['customer_name', 'gst_number', 'state'],
+          attributes: ['customer_name', 'gst_number', 'state', 'address', 'createdAt'],
+        },
+        {
+          model: User,
+          as: 'creator',
+          attributes: ['id', 'name', 'location'],
         },
       ],
       order: [['createdAt', 'DESC']],
     });
 
-    const salesData = rangePIs.map((pi) => {
-      const totalAmount = pi.items.reduce((sum, item) => sum + (item.qty * item.rate), 0);
+    const visiblePIs = rangePIs.filter((pi) => matchesLocationFilter(pi, location));
+
+    const salesData = visiblePIs.map((pi) => {
+      const totalAmount = pi.items.reduce((sum, item) => sum + (Number(item.qty) * Number(item.rate)), 0);
       const articles = pi.items.map((item) => ({
         code: item.product.leather_code,
         color: item.product.color,
-        qty: item.qty,
-        rate: item.rate,
-        amount: item.qty * item.rate,
+        qty: Number(item.qty) || 0,
+        rate: Number(item.rate) || 0,
+        amount: (Number(item.qty) || 0) * (Number(item.rate) || 0),
       }));
 
       return {
         pi_id: pi.id,
         customer_id: pi.customer_id,
+        company_name: pi.company_name || 'UNKNOWN',
         customer_name: pi.customer?.customer_name || 'Unknown',
         gst_number: pi.customer?.gst_number || 'N/A',
         state: pi.customer?.state || 'N/A',
+        location: inferLocationLabel(pi),
+        executive_id: pi.created_by || null,
+        executive_name: pi.creator?.name || 'Unassigned',
+        executive_location: pi.creator?.location || 'DEFAULT',
         status: pi.status,
         payment_status: pi.payment_status,
-        amount_paid: pi.amount_paid,
+        amount_paid: Number(pi.amount_paid) || 0,
         total_amount: totalAmount,
         dispatched_at: pi.dispatched_at,
         articles,
@@ -3058,6 +3188,99 @@ exports.getSalesData = async (req, res) => {
     const dispatchedCount = salesData.filter((pi) => pi.status === 'DISPATCHED').length;
     const totalRevenue = salesData.reduce((sum, pi) => sum + pi.total_amount, 0);
     const totalPaid = salesData.reduce((sum, pi) => sum + pi.amount_paid, 0);
+    const pendingDispatchCount = totalPIs - dispatchedCount;
+
+    const executiveMap = {};
+    const locationMap = {};
+    const timelineMap = {};
+    const companyMap = {};
+
+    salesData.forEach((pi) => {
+      const companyKey = pi.company_name || 'UNKNOWN';
+      if (!companyMap[companyKey]) {
+        companyMap[companyKey] = {
+          company_name: companyKey,
+          total_pis: 0,
+          dispatched_count: 0,
+          pending_dispatch_count: 0,
+          total_amount: 0,
+          total_paid: 0,
+          pending_payment: 0,
+        };
+      }
+      companyMap[companyKey].total_pis += 1;
+      companyMap[companyKey].dispatched_count += pi.status === 'DISPATCHED' ? 1 : 0;
+      companyMap[companyKey].pending_dispatch_count += pi.status === 'DISPATCHED' ? 0 : 1;
+      companyMap[companyKey].total_amount += pi.total_amount;
+      companyMap[companyKey].total_paid += pi.amount_paid;
+      companyMap[companyKey].pending_payment += pi.total_amount - pi.amount_paid;
+
+      const executiveKey = pi.executive_name || 'Unassigned';
+      if (!executiveMap[executiveKey]) {
+        executiveMap[executiveKey] = {
+          executive_name: executiveKey,
+          executive_id: pi.executive_id,
+          executive_location: pi.executive_location,
+          total_pis: 0,
+          dispatched_count: 0,
+          total_amount: 0,
+          total_paid: 0,
+        };
+      }
+      executiveMap[executiveKey].total_pis += 1;
+      executiveMap[executiveKey].dispatched_count += pi.status === 'DISPATCHED' ? 1 : 0;
+      executiveMap[executiveKey].total_amount += pi.total_amount;
+      executiveMap[executiveKey].total_paid += pi.amount_paid;
+
+      const locationKey = pi.location || 'Unknown';
+      if (!locationMap[locationKey]) {
+        locationMap[locationKey] = {
+          location: locationKey,
+          total_pis: 0,
+          dispatched_count: 0,
+          total_amount: 0,
+          new_customers: 0,
+        };
+      }
+      locationMap[locationKey].total_pis += 1;
+      locationMap[locationKey].dispatched_count += pi.status === 'DISPATCHED' ? 1 : 0;
+      locationMap[locationKey].total_amount += pi.total_amount;
+
+      const dayKey = toDayKey(pi.created_at);
+      if (!timelineMap[dayKey]) {
+        timelineMap[dayKey] = {
+          date: dayKey,
+          created_count: 0,
+          dispatched_count: 0,
+          total_amount: 0,
+        };
+      }
+      timelineMap[dayKey].created_count += 1;
+      timelineMap[dayKey].dispatched_count += pi.status === 'DISPATCHED' ? 1 : 0;
+      timelineMap[dayKey].total_amount += pi.total_amount;
+    });
+
+    const customerWhere = {
+      createdAt: {
+        [Op.gte]: startOfDay,
+        [Op.lt]: endOfDay,
+      },
+    };
+
+    if (company && company !== 'ALL') {
+      customerWhere.price_list = company;
+    }
+
+    if (location) {
+      customerWhere[Op.or] = [
+        { state: { [Op.like]: `%${location}%` } },
+        { address: { [Op.like]: `%${location}%` } },
+      ];
+    }
+
+    const newCustomersCount = await Customer.count({ where: customerWhere });
+    const executiveCount = Object.keys(executiveMap).length;
+    const locationCount = Object.keys(locationMap).length;
 
     const customerMap = {};
     salesData.forEach((pi) => {
@@ -3079,16 +3302,28 @@ exports.getSalesData = async (req, res) => {
       customerMap[customerKey].pi_count += 1;
     });
 
+    const timeline = Object.values(timelineMap).sort((a, b) => a.date.localeCompare(b.date));
+    const executives = Object.values(executiveMap).sort((a, b) => b.total_pis - a.total_pis);
+    const locations = Object.values(locationMap).sort((a, b) => b.total_pis - a.total_pis);
+
     res.json({
       summary: {
         period_label: periodLabel,
         total_pis: totalPIs,
         dispatched_count: dispatchedCount,
+        pending_dispatch_count: pendingDispatchCount,
         total_revenue: totalRevenue,
         total_paid: totalPaid,
         pending_payment: totalRevenue - totalPaid,
+        new_customers_count: newCustomersCount,
+        executive_count: executiveCount,
+        location_count: locationCount,
       },
+      company_breakdown: Object.values(companyMap).sort((a, b) => b.total_pis - a.total_pis),
       customers: Object.values(customerMap),
+      executives,
+      locations,
+      timeline,
       pis: salesData,
     });
   } catch (err) {

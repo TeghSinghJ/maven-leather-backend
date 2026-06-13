@@ -120,6 +120,21 @@ module.exports = (sequelize, DataTypes) => {
         type: DataTypes.FLOAT,
         defaultValue: 0,
       },
+      perforation_qty: {
+        type: DataTypes.FLOAT,
+        allowNull: true,
+        defaultValue: 0,
+      },
+      perforation_amount: {
+        type: DataTypes.FLOAT,
+        allowNull: true,
+        defaultValue: 0,
+      },
+      perforation_payment_status: {
+        type: DataTypes.ENUM("PENDING", "PAID"),
+        allowNull: true,
+        defaultValue: "PENDING",
+      },
       billing_address: {
         type: DataTypes.STRING,
         allowNull: true,
