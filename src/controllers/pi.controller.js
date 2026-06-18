@@ -71,6 +71,15 @@ const SALES_LOCATION_PRIORITY = [
 
 const normalizeText = (value) => String(value || "").toLowerCase();
 
+const quantitiesMatch = (a, b, tolerance = 0.01) =>
+  Math.abs(Number(a) - Number(b)) <= tolerance;
+
+const normalizeRevisionRate = (value) => {
+  if (value === undefined || value === null || value === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+};
+
 const inferLocationLabel = (pi) => {
   const searchText = normalizeText(
     [
@@ -460,6 +469,7 @@ exports.createPI = async (req, res) => {
       delivery_address,
       billing_address,
       shipping_address,
+      location,
       transport_type_id,
       transport_id,
       weight_kg,
@@ -474,6 +484,7 @@ exports.createPI = async (req, res) => {
       delivery_address,
       billing_address,
       shipping_address,
+      location,
       hasItems: Array.isArray(items)
     });
 
@@ -503,6 +514,7 @@ exports.createPI = async (req, res) => {
         delivery_address,
         billing_address,
         shipping_address,
+        location,
         transport_type_id,
         transport_id,
         weight_kg,
@@ -1112,10 +1124,11 @@ exports.suggestRevisit = async (req, res) => {
       }
 
       const requestedQty = Number(item.qty);
-      const rate = rateMap[item.product_id];
+      const providedRate = normalizeRevisionRate(item.rate);
+      const rate = providedRate !== null ? providedRate : rateMap[item.product_id];
 
       if (rate === undefined || rate === null) {
-        throw new Error(`Rate not found for product ${item.product_id}`);
+        throw new Error(`Rate not found for product ${item.product_id}. Provide a rate for added articles.`);
       }
 
       // Check if it's Vitton collection
@@ -1146,10 +1159,11 @@ exports.suggestRevisit = async (req, res) => {
       const isVitton = product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton');
 
       if (isVitton) {
-        // For Vitton, use LeatherStock as a single roll
+        // For Vitton, allocate directly from the roll stock up to the available qty
         const stock = await LeatherStock.findOne({
           where: { product_id: item.product_id },
           attributes: ['available_qty'],
+          order: [['available_qty', 'DESC']],
           transaction: t,
           lock: t.LOCK.SHARE,
         });
@@ -1169,7 +1183,7 @@ exports.suggestRevisit = async (req, res) => {
           continue;
         }
 
-        if (requestedQty !== stock.available_qty) {
+        if (requestedQty > stock.available_qty) {
           suggestions.push({
             product_id: item.product_id,
             requested_qty: requestedQty,
@@ -1179,12 +1193,12 @@ exports.suggestRevisit = async (req, res) => {
             hides: [],
             rate,
             unit: "mtr",
-            reason: `Vitton roll must be taken as a full roll. Available roll size is ${stock.available_qty} mtr, requested ${requestedQty} mtr.`,
+            reason: `Insufficient Vitton roll stock. Available roll size is ${stock.available_qty} mtr, requested ${requestedQty} mtr.`,
           });
           continue;
         }
 
-        // Exact match
+        // Allocate the requested portion of the roll when stock is sufficient
         suggestions.push({
           product_id: item.product_id,
           leather_code: item.leather_code,
@@ -1373,10 +1387,11 @@ exports.revisitPI = async (req, res) => {
         throw new Error("Invalid item payload");
 
       // Use manual rate if provided, otherwise use existing rate
-      const rate = item.rate !== undefined ? Number(item.rate) : rateMap[item.product_id];
+      const providedRate = normalizeRevisionRate(item.rate);
+      const rate = providedRate !== null ? providedRate : rateMap[item.product_id];
       if (rate === undefined || rate === null || isNaN(rate))
         throw new Error(
-          `Rate not found for product ${item.product_id}. Cannot revisit PI`,
+          `Rate not found for product ${item.product_id}. Cannot revisit PI without a rate for new articles`,
         );
 
       // Check if it's Vitton collection
@@ -1408,6 +1423,7 @@ exports.revisitPI = async (req, res) => {
 
       const leatherStock = await LeatherStock.findOne({
         where: { product_id: item.product_id },
+        order: [['available_qty', 'DESC']],
         transaction: t,
         lock: t.LOCK.UPDATE,
       });
@@ -1417,14 +1433,14 @@ exports.revisitPI = async (req, res) => {
         );
 
       if (isVitton) {
-        // For Vitton, check exact roll match
-        if (leatherStock.available_qty !== item.qty) {
+        // For Vitton, allow any allocation up to the available roll quantity
+        if (item.qty > leatherStock.available_qty) {
           throw new Error(
-            `For Vitton collection, available roll size is ${leatherStock.available_qty} sqm, requested ${item.qty} sqm. Cannot allocate partial roll.`,
+            `For Vitton collection, available roll size is ${leatherStock.available_qty} sqm, requested ${item.qty} sqm.`,
           );
         }
 
-        // Allocate the whole roll
+        // Allocate the requested portion of the roll
         leatherStock.available_qty -= item.qty;
         leatherStock.reserved_qty += item.qty;
         await leatherStock.save({ transaction: t });
@@ -1847,6 +1863,7 @@ exports.createPIConfirmed = async (req, res) => {
       price_type,
       company_name,
       price_list,
+      location,
       perforation_qty,
       perforation_amount,
       perforation_payment_status,
@@ -1877,6 +1894,7 @@ exports.createPIConfirmed = async (req, res) => {
         customer_id,
         company_name: company,
         created_by: req.user.id,
+        location,
         perforation_qty: Number(perforation_qty || 0),
         perforation_amount: Number(
           perforation_amount || (Number(perforation_qty || 0) > 0 ? Number(perforation_qty || 0) * 50 : 0),

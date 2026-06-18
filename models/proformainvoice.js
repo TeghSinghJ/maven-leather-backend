@@ -49,6 +49,11 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: COMPANY.MARVIN,
       },
+      location: {
+        type: DataTypes.STRING,
+        allowNull: true,
+        comment: "Stock location/branch used for GST calculation",
+      },
       status: {
         type: DataTypes.ENUM(
           "ACTIVE",

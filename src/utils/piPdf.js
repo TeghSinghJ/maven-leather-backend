@@ -36,9 +36,29 @@ function amountInWords(num) {
   return `Rs. ${words} Only`;
 }
 
+const STOCK_LOCATION_STATE_MAP = {
+  Bangalore: "Karnataka",
+  Delhi: "Delhi",
+  Mumbai: "Maharashtra",
+  "Western Colours": "Karnataka",
+  Italy: "Italy",
+};
+
+function getStockState(location) {
+  if (!location) return "";
+
+  const normalizedLocation = String(location).trim().toLowerCase();
+  const match = Object.entries(STOCK_LOCATION_STATE_MAP).find(
+    ([label]) => label.toLowerCase() === normalizedLocation,
+  );
+
+  return match ? match[1] : String(location).trim();
+}
+
 module.exports = function generateExactPIPdf(res, pi) {
   console.log("PI DATA FOR PDF:", {
     id: pi.id,
+    location: pi.location,
     shipping_address: pi.shipping_address,
     billing_address: pi.billing_address,
     delivery_address: pi.delivery_address,
@@ -146,9 +166,10 @@ module.exports = function generateExactPIPdf(res, pi) {
 
   const displayBankName = sanitizeBankName(company.bankName);
 
+  const stockState = getStockState(pi.location) || company.state;
   const sameState =
     pi.state?.toLowerCase().trim() ===
-    company.state?.toLowerCase().trim();
+    String(stockState || "").toLowerCase().trim();
 
   let y = 40;
 
