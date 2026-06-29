@@ -40,13 +40,8 @@ const normalizeBatchEntries = (value) => {
 exports.createOrderFormSnapshotFromPI = async (pi, user, transaction) => {
   if (!pi) return null;
 
-  const existing = await OrderForm.findOne({
-    where: { customer_name: pi.customer?.customer_name || pi.customer_name, order_date: pi.createdAt?.toISOString?.().slice(0, 10) || null },
-    transaction,
-  });
-
-  if (existing) return existing;
-
+  // Always create a NEW order form for each PI
+  // This ensures all articles from all PIs are captured
   const orderNumber = await generateOrderNumber();
   const orderForm = await OrderForm.create(
     {
@@ -63,14 +58,17 @@ exports.createOrderFormSnapshotFromPI = async (pi, user, transaction) => {
       order_time: pi.createdAt ? pi.createdAt.toTimeString().slice(0, 5) : null,
       requested_delivery_date: null,
       delivery_time: null,
-      notes: `Auto-generated from PI ${pi.id}`,
+      notes: `Auto-generated from PI ${pi.id}${pi.revision_no ? ` (Revision ${pi.revision_no})` : ''}`,
       status: 'DRAFT',
       created_by: user?.id || pi.created_by,
     },
     { transaction },
   );
 
+  // Add ALL items from the PI
   const items = Array.isArray(pi.items) ? pi.items : [];
+  console.log(`📋 Creating order form ${orderForm.order_number} for PI ${pi.id} with ${items.length} items`);
+  
   for (const item of items) {
     const batchInfo = normalizeBatchEntries(item.batch_info);
     await OrderFormItem.create(
@@ -88,6 +86,7 @@ exports.createOrderFormSnapshotFromPI = async (pi, user, transaction) => {
     );
   }
 
+  console.log(`✓ Order form ${orderForm.order_number} created with ${items.length} items`);
   return orderForm;
 };
 

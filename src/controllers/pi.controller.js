@@ -1646,6 +1646,15 @@ exports.revisitPI = async (req, res) => {
       }
     }
 
+    // Fetch the revised PI with all its items to create an order form
+    const revisedPiWithItems = await ProformaInvoice.findByPk(revisedPi.id, {
+      include: [{ model: PIItem, as: "items" }],
+      transaction: t,
+    });
+
+    // Create an order form snapshot for the revised PI
+    await createOrderFormSnapshotFromPI(revisedPiWithItems, req.user, t);
+
     await t.commit();
     return res.json({
       message: "PI revised successfully",
@@ -2384,12 +2393,10 @@ exports.adminApprovePI = async (req, res) => {
           await h.save({ transaction: t });
         }
 
-        if (allocatedQty !== piItem.qty) {
-          throw new Error(`Allocated quantity (${allocatedQty}) does not match required quantity (${piItem.qty}) for item ${item_id}`);
-        }
-
-        // Update the PI item with new batch info
-        await piItem.update({ batch_info: batchInfo }, { transaction: t });
+        // Update the PI item with admin's selected quantity and batch info
+        // Allow admin to approve even if allocated qty differs from original qty
+        console.log(`📦 Item ${item_id}: Updating qty from ${piItem.qty} to ${allocatedQty} based on admin's hide selection`);
+        await piItem.update({ batch_info: batchInfo, qty: allocatedQty }, { transaction: t });
 
         // Update product stock
         const stock = stockMap[piItem.product_id];
