@@ -27,15 +27,57 @@ exports.bulkUploadHidesExcel = async (req, res) => {
     if (!data.length)
       return res.status(400).json({ message: "Excel is empty" });
 
-    const validData = data.filter(row => row.batch_no && row.qty);
+    console.log("📋 Excel data sample:", data[0]);
+    console.log("📋 Available columns:", Object.keys(data[0] || {}));
 
-    if (!validData.length)
-      return res.status(400).json({ message: "No valid rows found" });
+    // Map flexible column names (batch_no, Batch No, batch no, etc.)
+    const normalizeRow = (row) => {
+      const normalized = {};
+      for (const [key, value] of Object.entries(row)) {
+        const lowerKey = String(key).toLowerCase().trim();
+        
+        // Match batch_no with variations
+        if (lowerKey.includes('batch')) {
+          normalized.batch_no = String(value).trim();
+        }
+        // Match qty with variations
+        else if (lowerKey.includes('qty') || lowerKey.includes('quantity') || lowerKey.includes('qnt')) {
+          normalized.qty = Number(value);
+        }
+        // Keep other columns as is
+        else {
+          normalized[key] = value;
+        }
+      }
+      return normalized;
+    };
+
+    const validData = data
+      .map(normalizeRow)
+      .filter((row, index) => {
+        const hasBatchNo = row.batch_no && String(row.batch_no).trim() !== '';
+        const hasQty = row.qty && !isNaN(row.qty) && Number(row.qty) > 0;
+        
+        if (!hasBatchNo || !hasQty) {
+          console.warn(`⚠️ Row ${index + 1} skipped: batch_no="${row.batch_no}", qty="${row.qty}"`);
+        }
+        return hasBatchNo && hasQty;
+      });
+
+    if (!validData.length) {
+      console.error("❌ No valid rows found after filtering");
+      return res.status(400).json({ 
+        message: "No valid rows found. Excel must have 'Batch No' and 'Qty' columns with values",
+        sample: data[0] ? Object.keys(data[0]) : [],
+      });
+    }
+
+    console.log(`✓ Processing ${validData.length} valid rows`);
 
     const bulkData = validData.map((row, index) => ({
       product_id,
       hide_id: `HIDE-${Date.now()}-${index + 1}`,
-      batch_no: row.batch_no,
+      batch_no: String(row.batch_no).trim(),
       qty: Number(row.qty),
     }));
 
@@ -44,13 +86,14 @@ exports.bulkUploadHidesExcel = async (req, res) => {
     await recalculateLeatherStock(product_id);
 
     res.status(201).json({
-      message: "Hides imported",
+      message: "Hides imported successfully",
       count: createdHides.length,
+      imported_rows: createdHides.map(h => ({ hide_id: h.hide_id, batch_no: h.batch_no, qty: h.qty })),
     });
 
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: err.message });
+    console.error("❌ Upload error:", err);
+    res.status(500).json({ message: `Upload failed: ${err.message}` });
   }
 };
 exports.createHideStock = async (req, res) => {
@@ -161,6 +204,35 @@ exports.updateHide = async (req, res) => {
     await recalculateLeatherStock(hide.product_id);
 
     res.json({ message: "Hide updated successfully", hide });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+};
+
+exports.deleteBatchHides = async (req, res) => {
+  try {
+    const { productId, batchNo } = req.params;
+    const decodedBatchNo = decodeURIComponent(batchNo || "");
+
+    if (!productId || !decodedBatchNo) {
+      return res.status(400).json({ message: "productId and batchNo are required" });
+    }
+
+    const deletedCount = await LeatherHideStock.destroy({
+      where: {
+        product_id: productId,
+        batch_no: decodedBatchNo,
+      },
+    });
+
+    await recalculateLeatherStock(productId);
+
+    res.json({
+      message: "Batch hides deleted successfully",
+      deletedCount,
+      batch_no: decodedBatchNo,
+    });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: err.message });

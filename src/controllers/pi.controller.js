@@ -1795,7 +1795,7 @@ exports.suggestBatch = async (req, res) => {
 
       // Check if it's Vitton collection
       const isVitton = isVittonColl;
-      
+
       // Fallback: if not detected from collection_id, check product's main collection
       let actualIsVitton = isVitton;
       if (!actualIsVitton) {
@@ -1823,9 +1823,15 @@ exports.suggestBatch = async (req, res) => {
         });
         actualIsVitton = product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton');
       }
-      
-      if (actualIsVitton) {
-        // For Vitton, use LeatherStock as a single "roll"
+
+      const hideStockRows = await LeatherHideStock.findAll({
+        where: { product_id, status: "AVAILABLE", qty: { [Op.gt]: 0 } },
+        attributes: ["batch_no", "qty", "hide_id"],
+        raw: true,
+      });
+
+      if (actualIsVitton && hideStockRows.length === 0) {
+        // For Vitton products with no hide stock, use LeatherStock as a single "roll"
         const stock = await LeatherStock.findOne({
           where: { product_id },
           attributes: ['available_qty'],
@@ -1851,7 +1857,7 @@ exports.suggestBatch = async (req, res) => {
           distance: Math.abs(allocated - requested_qty),
           hides: [{ hide_id: "roll", hide_qty: allocated }],
           withinTolerance: true, // Always true for Vitton direct approval
-          isBestMatch: true
+          isBestMatch: true,
         };
         response.push({
           product_id,
@@ -1861,14 +1867,10 @@ exports.suggestBatch = async (req, res) => {
           reason: "Roll stock available",
         });
         continue;
-      } else {
-        // Original logic for hides
-        hides = await LeatherHideStock.findAll({
-          where: { product_id, status: "AVAILABLE" },
-          attributes: ["batch_no", "qty", "hide_id"],
-          raw: true,
-        });
       }
+
+      // Original logic for hides
+      const hides = hideStockRows;
 
       if (!hides.length) {
         response.push({
@@ -2078,14 +2080,31 @@ exports.createPIConfirmed = async (req, res) => {
         transaction: t,
       });
 
-      const isVittonRoll = product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton') && hides[0].hide_id === 'roll';
+      const hasAvailableHideStock = await LeatherHideStock.findOne({
+        where: {
+          product_id,
+          status: 'AVAILABLE',
+          qty: { [Op.gt]: 0 },
+        },
+        attributes: ['id'],
+        transaction: t,
+      });
+
+      const isRollSelection = Array.isArray(hides) && hides.some((h) => String(h.hide_id || '').trim().toLowerCase() === 'roll');
+      const isVittonRoll = Boolean(
+        product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton') &&
+        isRollSelection &&
+        !hasAvailableHideStock,
+      );
 
       console.log('Product lookup result:', {
         product_id,
         product_found: !!product,
         main_collection_name: product?.series?.subCollection?.mainCollection?.name,
-        hide_id: hides[0].hide_id,
-        isVittonRoll
+        hide_id: hides[0]?.hide_id,
+        hasAvailableHideStock: !!hasAvailableHideStock,
+        isRollSelection,
+        isVittonRoll,
       });
 
       if (!isVittonRoll) allVitton = false;
@@ -2125,36 +2144,84 @@ exports.createPIConfirmed = async (req, res) => {
           await stock.save({ transaction: t });
         }
       } else {
-        // 🔒 Lock selected hides
-        const hideIds = hides.map((h) => h.hide_id);
-        const hideRecords = await LeatherHideStock.findAll({
-          where: { hide_id: hideIds, status: "AVAILABLE" },
-          transaction: t,
-          lock: t.LOCK.UPDATE,
-          order: [["id", "ASC"]],
-        });
+        const requiredQty = Number(requested_qty || 0);
 
-        if (hideRecords.length !== hides.length) {
-          throw new Error(
-            `Some hides are no longer available for batch ${batch_no}`,
-          );
+        // Prefer the hides selected by the batch suggestion, but allow fallback
+        // to other available hides for the same batch/product when one is no longer available.
+        const requestedHideSelections = Array.isArray(hides) ? hides : [];
+        const requestedHideIds = requestedHideSelections
+          .map((h) => h.hide_id)
+          .filter(Boolean);
+
+        let hideRecords = [];
+        if (requestedHideIds.length > 0) {
+          hideRecords = await LeatherHideStock.findAll({
+            where: { hide_id: { [Op.in]: requestedHideIds } },
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+            order: [["id", "ASC"]],
+          });
         }
 
-        // 3️⃣ Reserve hides
-        for (const h of hideRecords) {
-          const hideQty = hides.find((x) => x.hide_id === h.hide_id).hide_qty;
+        const availablePreferredRecords = hideRecords.filter((h) => h.status === "AVAILABLE");
 
-          allocatedQty += hideQty;
+        for (const h of availablePreferredRecords) {
+          const requestedSelection = requestedHideSelections.find((x) => x.hide_id === h.hide_id);
+          const requestedHideQty = Number(requestedSelection?.hide_qty || 0);
+          if (requestedHideQty <= 0) continue;
+
+          const allocationQty = Math.min(requestedHideQty, Number(h.qty || 0));
+          if (allocationQty <= 0) continue;
+
+          allocatedQty += allocationQty;
           batchInfo.push({
             hide_id: h.hide_id,
             batch_no,
-            qty: hideQty,
+            qty: allocationQty,
           });
 
-          // Update hide stock
-          h.qty -= hideQty;
+          h.qty -= allocationQty;
           if (h.qty <= 0) h.status = "RESERVED";
           await h.save({ transaction: t });
+
+          if (allocatedQty >= requiredQty) break;
+        }
+
+        if (allocatedQty < requiredQty) {
+          const fallbackRecords = await LeatherHideStock.findAll({
+            where: {
+              product_id,
+              batch_no,
+              status: "AVAILABLE",
+              qty: { [Op.gt]: 0 },
+              hide_id: { [Op.notIn]: availablePreferredRecords.map((h) => h.hide_id).filter(Boolean) },
+            },
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+            order: [["id", "ASC"]],
+          });
+
+          for (const fallbackHide of fallbackRecords) {
+            if (allocatedQty >= requiredQty) break;
+            const remainingQty = requiredQty - allocatedQty;
+            const allocationQty = Math.min(Number(fallbackHide.qty || 0), remainingQty);
+            if (allocationQty <= 0) continue;
+
+            allocatedQty += allocationQty;
+            batchInfo.push({
+              hide_id: fallbackHide.hide_id,
+              batch_no,
+              qty: allocationQty,
+            });
+
+            fallbackHide.qty -= allocationQty;
+            if (fallbackHide.qty <= 0) fallbackHide.status = "RESERVED";
+            await fallbackHide.save({ transaction: t });
+          }
+        }
+
+        if (allocatedQty < requiredQty) {
+          throw new Error(`Insufficient available hide stock for product ${product_id} batch ${batch_no}`);
         }
 
         // 4️⃣ Update product stock
@@ -2361,40 +2428,89 @@ exports.adminApprovePI = async (req, res) => {
         let allocatedQty = 0;
         const batchInfo = [];
 
-        // Validate and allocate new hides
-        const hideIds = hides.map((h) => h.hide_id);
-        const hideRecords = await LeatherHideStock.findAll({
-          where: { 
-            hide_id: { [Op.in]: hideIds },
-            status: "AVAILABLE" 
-          },
-          transaction: t,
-          lock: t.LOCK.UPDATE,
-          order: [["id", "ASC"]],
-        });
+        const requestedQty = Number(piItem.qty || 0);
+        const requestedHideSelections = Array.isArray(hides) ? hides : [];
+        const requestedHideIds = requestedHideSelections
+          .map((h) => h.hide_id)
+          .filter(Boolean);
 
-        if (hideRecords.length !== hides.length) {
-          throw new Error(`Some hides are no longer available for item ${item_id}`);
+        let hideRecords = [];
+        if (requestedHideIds.length > 0) {
+          hideRecords = await LeatherHideStock.findAll({
+            where: {
+              hide_id: { [Op.in]: requestedHideIds },
+            },
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+            order: [["id", "ASC"]],
+          });
         }
 
-        for (const h of hideRecords) {
-          const hideQty = hides.find((x) => x.hide_id === h.hide_id).hide_qty;
-          allocatedQty += hideQty;
+        const availablePreferredRecords = hideRecords.filter((h) => h.status === "AVAILABLE");
+
+        for (const h of availablePreferredRecords) {
+          const requestedSelection = requestedHideSelections.find((x) => x.hide_id === h.hide_id);
+          const requestedHideQty = Number(requestedSelection?.hide_qty || 0);
+          if (requestedHideQty <= 0) continue;
+
+          const allocationQty = Math.min(requestedHideQty, Number(h.qty || 0));
+          if (allocationQty <= 0) continue;
+
+          allocatedQty += allocationQty;
           batchInfo.push({
             id: h.id,
             hide_id: h.hide_id,
             batch_no: h.batch_no,
-            qty: hideQty,
+            qty: allocationQty,
             collection_series_id: h.collection_series_id,
           });
 
-          h.qty -= hideQty;
+          h.qty -= allocationQty;
           h.status = "RESERVED";
           await h.save({ transaction: t });
+
+          if (allocatedQty >= requestedQty) break;
+        }
+
+        if (allocatedQty < requestedQty) {
+          const fallbackRecords = await LeatherHideStock.findAll({
+            where: {
+              product_id: piItem.product_id,
+              status: "AVAILABLE",
+              qty: { [Op.gt]: 0 },
+              hide_id: { [Op.notIn]: availablePreferredRecords.map((h) => h.hide_id).filter(Boolean) },
+            },
+            transaction: t,
+            lock: t.LOCK.UPDATE,
+            order: [["id", "ASC"]],
+          });
+
+          for (const fallbackHide of fallbackRecords) {
+            if (allocatedQty >= requestedQty) break;
+            const remainingQty = requestedQty - allocatedQty;
+            const allocationQty = Math.min(Number(fallbackHide.qty || 0), remainingQty);
+            if (allocationQty <= 0) continue;
+
+            allocatedQty += allocationQty;
+            batchInfo.push({
+              id: fallbackHide.id,
+              hide_id: fallbackHide.hide_id,
+              batch_no: fallbackHide.batch_no,
+              qty: allocationQty,
+              collection_series_id: fallbackHide.collection_series_id,
+            });
+
+            fallbackHide.qty -= allocationQty;
+            fallbackHide.status = "RESERVED";
+            await fallbackHide.save({ transaction: t });
+          }
+        }
+
+        if (allocatedQty < requestedQty) {
+          throw new Error(`Insufficient available hide stock for item ${item_id}`);
         }
 
         // Update the PI item with admin's selected quantity and batch info
-        // Allow admin to approve even if allocated qty differs from original qty
         console.log(`📦 Item ${item_id}: Updating qty from ${piItem.qty} to ${allocatedQty} based on admin's hide selection`);
         await piItem.update({ batch_info: batchInfo, qty: allocatedQty }, { transaction: t });
 

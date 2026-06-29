@@ -7,6 +7,7 @@ const upload = require("../middlewares/upload.middleware");
 
 router.post("/", controller.createHideStock);
 router.get("/product/:productId", controller.listByProduct);
+router.delete("/product/:productId/batch/:batchNo", controller.deleteBatchHides);
 router.patch("/:id/status", controller.updateStatus);
 router.put("/:id", controller.updateHide);
 router.delete("/:id", controller.deleteHide);
