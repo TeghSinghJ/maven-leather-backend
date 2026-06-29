@@ -1,6 +1,9 @@
 const { LeatherProduct, LeatherStock,LeatherHideStock,CollectionPrice, sequelize, CollectionSeries, SubCollection, MainCollection } = require("../../models");
 const { body, validationResult } = require("express-validator");
 const { Op, fn ,col} = require("sequelize"); // 👈 REQUIRED
+const { getCache, setCache, deleteCacheByPrefix } = require('../services/cache.service');
+
+const PRODUCT_CACHE_TTL = 120; // seconds
 
 exports.createProduct = [
   body("collection_series_id").isInt().withMessage("Collection Series ID is required"),
@@ -86,6 +89,7 @@ exports.createProduct = [
       }
 
       await transaction.commit();
+      await deleteCacheByPrefix('products:');
 
       res.status(201).json({ message: "Product and stock saved successfully", product });
     } catch (error) {
@@ -139,6 +143,7 @@ exports.addStock = async (req, res) => {
 
     await stock.save({ transaction });
     await transaction.commit();
+    await deleteCacheByPrefix('products:');
 
     console.log("Stock updated successfully:", { productId: req.params.id, location: stockLocation, qty });
     res.json({ message: "Stock updated successfully", stock });
@@ -160,11 +165,30 @@ exports.getProducts = async (req, res) => {
       collection_id: req.query.collection_id,
       collection_series_id: req.query.collection_series_id,
       price_list: req.query.price_list,
+      search: req.query.search,
+      limit: req.query.limit,
+      page: req.query.page,
     });
+
+    const { search, limit, page } = req.query;
+    const cacheKey = `products:${JSON.stringify({ search: search || '', limit: limit || '0', page: page || '1', collection_id: req.query.collection_id || '', collection_series_id: req.query.collection_series_id || '', location: req.query.location || '', price_list: req.query.price_list || '' })}`;
+    const cachedProducts = await getCache(cacheKey);
+    if (cachedProducts) {
+      return res.json(cachedProducts);
+    }
 
     const whereClause = {
       status: "ACTIVE",
     };
+
+    if (search && search.trim()) {
+      const q = `%${search.trim()}%`;
+      whereClause[Op.or] = [
+        { leather_code: { [Op.like]: q } },
+        { color: { [Op.like]: q } },
+        { description: { [Op.like]: q } },
+      ];
+    }
 
     // Support filtering by collection_series_id or by collection_id (main collection)
     if (req.query.collection_series_id) {
@@ -193,7 +217,7 @@ exports.getProducts = async (req, res) => {
     // When location is specified, use LEFT JOIN so products without stock in that location still appear with zero values
     const stockRequired = false;
 
-    const products = await LeatherProduct.findAll({
+    const queryOptions = {
       where: whereClause,
       include: [
         {
@@ -222,7 +246,14 @@ exports.getProducts = async (req, res) => {
         },
       ],
       order: [["createdAt", "DESC"]],
-    });
+    };
+
+    if (limit) {
+      queryOptions.limit = Number(limit);
+      queryOptions.offset = page ? (Number(page) - 1) * Number(limit) : 0;
+    }
+
+    const products = await LeatherProduct.findAll(queryOptions);
 
     if (!products.length) return res.json([]);
 
@@ -285,6 +316,7 @@ exports.getProducts = async (req, res) => {
     });
     console.log(`✅ Returning ${result.length} products for location: ${location || 'ALL'}`);
     console.log(`📋 Products returned: ${result.map(r => r.leather_code).join(', ')}`);
+    await setCache(cacheKey, result, PRODUCT_CACHE_TTL);
     res.json(result);
   } catch (error) {
     console.error("getProducts error:", error);
@@ -322,6 +354,7 @@ exports.updateProduct = async (req, res) => {
 
     if (!updated) return res.status(404).json({ message: "Product not found or inactive" });
 
+    await deleteCacheByPrefix('products:');
     console.log("Product updated successfully:", req.params.id);
     res.json({ message: "Product updated successfully" });
   } catch (err) {
@@ -348,6 +381,7 @@ exports.deleteProduct = async (req, res) => {
 
     if (!deleted) return res.status(404).json({ message: "Product not found" });
 
+    await deleteCacheByPrefix('products:');
     res.status(204).send();
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -356,9 +390,26 @@ exports.deleteProduct = async (req, res) => {
 
 exports.getAvailableProducts = async (req, res) => {
   try {
-    const products = await LeatherProduct.findAll({
-      where: { status: "ACTIVE" },
+    const { search, limit, page } = req.query;
+    const cacheKey = `products:available:${JSON.stringify({ search: search || '', limit: limit || '0', page: page || '1', price_list: req.query.price_list || '' })}`;
+    const cachedProducts = await getCache(cacheKey);
+    if (cachedProducts) {
+      return res.json(cachedProducts);
+    }
 
+    const whereClause = { status: "ACTIVE" };
+
+    if (search && search.trim()) {
+      const q = `%${search.trim()}%`;
+      whereClause[Op.or] = [
+        { leather_code: { [Op.like]: q } },
+        { color: { [Op.like]: q } },
+        { description: { [Op.like]: q } },
+      ];
+    }
+
+    const queryOptions = {
+      where: whereClause,
       include: [
         {
           model: LeatherHideStock,
@@ -371,17 +422,28 @@ exports.getAvailableProducts = async (req, res) => {
           attributes: [],
         },
       ],
-
       attributes: {
         include: [[fn("SUM", col("batches.qty")), "available_qty"]],
       },
-
       group: ["LeatherProduct.id"],
       order: [["createdAt", "DESC"]],
       raw: true,
-    });
+    };
 
-    if (!products.length) return res.json([]);
+    if (limit) {
+      queryOptions.limit = Number(limit);
+      queryOptions.offset = page ? (Number(page) - 1) * Number(limit) : 0;
+    } else if (search && search.trim()) {
+      queryOptions.limit = 100;
+      queryOptions.offset = page ? (Number(page) - 1) * 100 : 0;
+    }
+
+    const products = await LeatherProduct.findAll(queryOptions);
+
+    if (!products.length) {
+      await setCache(cacheKey, [], PRODUCT_CACHE_TTL);
+      return res.json([]);
+    }
 
     const seriesIds = [
       ...new Set(products.map(p => p.collection_series_id)),
@@ -424,6 +486,7 @@ exports.getAvailableProducts = async (req, res) => {
       },
     }));
 
+    await setCache(cacheKey, result, PRODUCT_CACHE_TTL);
     res.json(result);
   } catch (error) {
     console.error("getAvailableProducts error:", error);
@@ -605,6 +668,7 @@ exports.bulkAddStockByCollection = async (req, res) => {
       }
 
       await transaction.commit();
+      await deleteCacheByPrefix('products:');
 
       res.json({
         message: `Stock added successfully to ${updatedCount} products in collection series`,

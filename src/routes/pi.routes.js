@@ -31,7 +31,7 @@ router.post("/:id/return", requireAuth, controller.returnPI);
 router.post("/:id/suggest-revisit", requireAuth, controller.suggestRevisit);
 router.put("/:id/revisit", requireAuth, controller.revisitPI);
 router.put("/:id/payment", requireAuth, controller.updatePaymentStatus);
-router.get("/:id/download", requireAuth, controller.downloadPI);
+router.get("/:id/download", controller.downloadPI);
 router.get("/:id", requireAuth, controller.getPIById);
 
 module.exports = router;

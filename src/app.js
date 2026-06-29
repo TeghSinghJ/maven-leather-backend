@@ -6,6 +6,7 @@ const piRoutes = require("./routes/pi.routes");
 const inventoryRoutes = require("./routes/inventory.routes");
 const { recalculateLeatherStock } = require("./services/leatherStock.service");
 const app = express();
+const piController = require('./controllers/pi.controller');
 
 // // Configure CORS based on environment
 // const corsOptions = {
@@ -46,6 +47,9 @@ app.use((req, res, next) => {
 app.use("/api/products", productRoutes);
 app.use("/uploads", express.static("uploads"));
 app.use("/api/pi", piRoutes);
+
+// Temporary public download route (no auth) for debugging/testing
+app.get('/api/pi-public/:id/download', piController.downloadPI);
 app.use("/api/inventory", inventoryRoutes);
 app.use("/api/collections", require("./routes/collection.routes"));
 app.use("/api/sub-collections", require("./routes/subCollection.routes"));
@@ -59,6 +63,7 @@ app.use("/api/customers", require("./routes/customer.routes"));
 app.use("/api/auth", require("./routes/auth.routes"));
 app.use("/api/users", require("./routes/users.routes"));
 app.use("/api/batches", require("./routes/batch.routes"));
+app.use("/api/order-forms", require("./routes/orderForm.routes"));
 
 app.get("/health", (req, res) => {
   res.json({ status: "OK" });

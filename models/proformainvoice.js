@@ -66,6 +66,28 @@ module.exports = (sequelize, DataTypes) => {
         ),
         defaultValue: "PENDING_APPROVAL",
       },
+      parent_pi_id: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: "Original PI id for revision tracking",
+      },
+      revision_no: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+        comment: "Revision number for this PI",
+      },
+      revision_reason: {
+        type: DataTypes.TEXT,
+        allowNull: true,
+        comment: "Reason for the PI revision",
+      },
+      is_revision: {
+        type: DataTypes.BOOLEAN,
+        allowNull: false,
+        defaultValue: false,
+        comment: "Whether this PI is a revised version of an earlier PI",
+      },
 
       invoice_bill_number: {
         type: DataTypes.STRING,

@@ -31,8 +31,12 @@ fs
     db[model.name] = model;
   });
 
-Object.keys(db).forEach(modelName => {
-  if (db[modelName].associate) {
+db.OrderForm = require('./orderform')(sequelize, Sequelize.DataTypes);
+db.OrderFormItem = require('./orderformitem')(sequelize, Sequelize.DataTypes);
+
+// Invoke `associate` on each model to register relationships
+Object.keys(db).forEach((modelName) => {
+  if (db[modelName] && typeof db[modelName].associate === 'function') {
     db[modelName].associate(db);
   }
 });

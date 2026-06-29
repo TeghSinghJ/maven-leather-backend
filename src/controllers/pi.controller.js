@@ -20,6 +20,8 @@ const { Op, Transaction } = require("sequelize");
 const { COMPANY, COMPANY_LIST } = require("../constants/company.constants");
 const generateExactPIPdf = require('../utils/piPdf');
 const { recalculateLeatherStock } = require("../services/leatherStock.service");
+const { createOrderFormSnapshotFromPI } = require('./orderForm.controller');
+const { buildRevisionPiData } = require('../utils/piRevision');
 
 const safeSetHideReassignmentRequired = async (pi, transaction) => {
   if (!pi) return;
@@ -53,6 +55,72 @@ const parseBatchInfo = (batchInfo) => {
   return [];
 };
 
+const normalizeBatchInfoForQty = (batchInfo, itemQty) => {
+  const parsedBatches = parseBatchInfo(batchInfo)
+    .filter((batch) => batch && batch.hide_id && Number(batch.qty || 0) > 0)
+    .map((batch) => ({
+      ...batch,
+      hide_id: String(batch.hide_id),
+      batch_no: batch.batch_no ? String(batch.batch_no) : "",
+      qty: Number(batch.qty || 0),
+    }));
+
+  if (parsedBatches.length === 0) return [];
+
+  const mergedBatches = new Map();
+  for (const batch of parsedBatches) {
+    const key = `${batch.hide_id || ""}:${batch.batch_no || ""}`;
+    const existing = mergedBatches.get(key);
+    if (existing) {
+      existing.qty = Number(existing.qty || 0) + Number(batch.qty || 0);
+    } else {
+      mergedBatches.set(key, { ...batch });
+    }
+  }
+
+  const normalized = Array.from(mergedBatches.values())
+    .filter((batch) => Number(batch.qty || 0) > 0)
+    .sort((a, b) => Number(b.qty || 0) - Number(a.qty || 0));
+
+  const targetQty = Number(itemQty || 0);
+  if (!Number.isFinite(targetQty) || targetQty <= 0) {
+    return normalized.map((batch) => ({ ...batch, qty: Number(batch.qty || 0) }));
+  }
+
+  let totalQty = normalized.reduce((sum, batch) => sum + Number(batch.qty || 0), 0);
+  if (totalQty <= targetQty) {
+    return normalized.map((batch) => ({ ...batch, qty: Number(batch.qty || 0) }));
+  }
+
+  const trimmed = normalized.map((batch) => ({ ...batch, qty: Number(batch.qty || 0) }));
+  let remainingQty = totalQty - targetQty;
+  for (const batch of trimmed) {
+    if (remainingQty <= 0) break;
+    const availableToTrim = Math.min(Number(batch.qty || 0), remainingQty);
+    batch.qty = Number((Number(batch.qty || 0) - availableToTrim).toFixed(2));
+    remainingQty = Number((remainingQty - availableToTrim).toFixed(2));
+  }
+
+  return trimmed.filter((batch) => Number(batch.qty || 0) > 0);
+};
+
+const resolveUpdatedItemQty = ({ incomingQty, currentQty }) => {
+  const currentQtyValue = Number(currentQty || 0);
+  if (incomingQty === undefined || incomingQty === null || incomingQty === "") {
+    return currentQtyValue;
+  }
+
+  const parsedQty = Number(incomingQty);
+  if (!Number.isFinite(parsedQty) || parsedQty <= 0) {
+    return currentQtyValue;
+  }
+
+  return Math.min(parsedQty, currentQtyValue || parsedQty);
+};
+
+exports.normalizeBatchInfoForQty = normalizeBatchInfoForQty;
+exports.resolveUpdatedItemQty = resolveUpdatedItemQty;
+
 const SALES_LOCATION_PRIORITY = [
   { label: "Bangalore", tokens: ["bangalore", "bengaluru"] },
   { label: "Hyderabad", tokens: ["hyderabad"] },
@@ -78,6 +146,142 @@ const normalizeRevisionRate = (value) => {
   if (value === undefined || value === null || value === "") return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+};
+
+const buildRevisitAllocationPlan = ({
+  existingItem,
+  requestedQty,
+  availableHideStocks,
+}) => {
+  const existingBatches = normalizeBatchInfoForQty(
+    existingItem?.batch_info,
+    existingItem?.qty,
+  );
+
+  const targetQty = Math.max(0, Number(requestedQty || 0));
+  const preservedBatchInfo = [];
+  const preservedHideKeys = new Set();
+  let preservedQty = 0;
+
+  const availableStocks = (Array.isArray(availableHideStocks) ? availableHideStocks : [])
+    .map((stock) => ({
+      hide_id: stock.hide_id,
+      batch_no: stock.batch_no,
+      qty: Number(stock.qty || 0),
+    }))
+    .filter((stock) => stock.qty > 0)
+    .sort((a, b) => b.qty - a.qty);
+
+  const availableStockMap = new Map();
+  for (const stock of availableStocks) {
+    const key = `${stock.hide_id || ""}:${stock.batch_no || ""}`;
+    availableStockMap.set(key, (availableStockMap.get(key) || 0) + stock.qty);
+  }
+
+  for (const batch of existingBatches) {
+    if (preservedQty >= targetQty) break;
+    const key = `${batch.hide_id || ""}:${batch.batch_no || ""}`;
+    const availableQty = availableStockMap.get(key) || 0;
+    if (availableQty <= 0) continue;
+
+    const qtyToPreserve = Math.min(Number(batch.qty || 0), targetQty - preservedQty, availableQty);
+    if (qtyToPreserve <= 0) continue;
+
+    preservedBatchInfo.push({
+      ...batch,
+      qty: qtyToPreserve,
+    });
+    preservedHideKeys.add(key);
+    preservedQty += qtyToPreserve;
+  }
+
+  const additionalBatchInfo = [];
+  let remainingQty = Math.max(0, targetQty - preservedQty);
+
+  for (const stock of availableStocks) {
+    if (remainingQty <= 0) break;
+    const key = `${stock.hide_id || ""}:${stock.batch_no || ""}`;
+    if (preservedHideKeys.has(key)) continue;
+
+    const qtyToUse = Math.min(stock.qty, remainingQty);
+    if (qtyToUse > 0) {
+      additionalBatchInfo.push({
+        hide_id: stock.hide_id,
+        batch_no: stock.batch_no,
+        qty: qtyToUse,
+      });
+      remainingQty -= qtyToUse;
+    }
+  }
+
+  return {
+    preservedBatchInfo,
+    additionalBatchInfo,
+    additionalQty: targetQty - preservedQty - remainingQty,
+    allocatedQty: preservedQty + (targetQty - preservedQty - remainingQty),
+  };
+};
+
+const restoreRevisitItemAllocations = async ({
+  item,
+  transaction,
+  restoredProducts,
+  restoredHideKeys,
+}) => {
+  if (!item) return;
+
+  const productId = item.product_id;
+  if (!restoredProducts.has(productId)) {
+    const stock = await LeatherStock.findOne({
+      where: { product_id: productId },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (stock) {
+      const qtyToRestore = Math.min(
+        Number(item.qty || 0),
+        Math.max(0, Number(stock.reserved_qty || 0)),
+      );
+      if (qtyToRestore > 0) {
+        stock.available_qty += qtyToRestore;
+        stock.reserved_qty = Math.max(0, Number(stock.reserved_qty || 0) - qtyToRestore);
+        await stock.save({ transaction });
+      }
+    }
+    restoredProducts.add(productId);
+  }
+
+  const normalizedBatches = normalizeBatchInfoForQty(
+    item?.batch_info,
+    item?.qty,
+  ).filter((batch) => batch && batch.hide_id);
+
+  for (const batch of normalizedBatches) {
+    const hideKey = `${batch.hide_id || ""}:${batch.batch_no || ""}`;
+    if (restoredHideKeys.has(hideKey)) continue;
+
+    const hideStock = await LeatherHideStock.findOne({
+      where: { hide_id: batch.hide_id },
+      transaction,
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    if (hideStock) {
+      const qtyToRestore = Number(batch.qty || 0);
+      const shouldRestoreQty =
+        hideStock.status === "RESERVED" ||
+        hideStock.status === "BLOCKED" ||
+        Number(hideStock.qty || 0) < qtyToRestore;
+
+      if (shouldRestoreQty) {
+        hideStock.qty = Number(hideStock.qty || 0) + qtyToRestore;
+      }
+      hideStock.status = "AVAILABLE";
+      await hideStock.save({ transaction });
+    }
+    restoredHideKeys.add(hideKey);
+  }
 };
 
 const inferLocationLabel = (pi) => {
@@ -359,93 +563,77 @@ const findOptimalHidesCombinations = (
   requested_qty,
   tolerance = 1,
 ) => {
-  if (hideList.length === 0) return [];
+  if (!Array.isArray(hideList) || hideList.length === 0) return [];
+
+  const EPSILON = 0.01;
+  const roundQty = (value) => Number((Number(value) || 0).toFixed(2));
+  const normalizedRequestedQty = roundQty(requested_qty);
 
   // Normalize hides: ensure numeric qty and stable order (largest first helps greedy fallback)
   const normalized = hideList
-    .map((h) => ({ hide_id: h.hide_id, qty: Number(h.qty) }))
+    .map((h) => ({ hide_id: h.hide_id, qty: roundQty(h.qty) }))
     .filter((h) => h.qty > 0)
     .sort((a, b) => b.qty - a.qty);
+
+  if (normalized.length === 0) return [];
+
+  const buildCombination = (selectedHides, total) => {
+    const roundedTotal = roundQty(total);
+    const difference = roundQty(roundedTotal - normalizedRequestedQty);
+    const absDistance = Math.abs(difference);
+
+    return {
+      allocated_qty: roundedTotal,
+      difference,
+      distance: absDistance,
+      hides: selectedHides.map((h) => ({
+        hide_id: h.hide_id,
+        hide_qty: roundQty(h.qty),
+      })),
+      withinTolerance: absDistance <= tolerance + EPSILON,
+    };
+  };
 
   const combinations = [];
   const n = normalized.length;
 
-  // Safety: exhaustive search only for reasonably small n (<=20)
-  const MAX_EXHAUSTIVE = 20;
+  // Use a scaled subset-sum style search so large batches still find exact or near-exact matches.
+  // This is much more reliable than the previous greedy fallback for big hide sets.
+  const scale = 100;
+  const targetCents = Math.round(normalizedRequestedQty * scale);
+  const maxCents = Math.round(
+    Math.max(normalizedRequestedQty, normalizedRequestedQty + tolerance) * scale + 100,
+  );
+  const dp = new Map([[0, []]]);
 
-  if (n <= MAX_EXHAUSTIVE) {
-    for (let mask = 1; mask < 1 << n; mask++) {
-      let total = 0;
-      const selectedHides = [];
-
-      for (let i = 0; i < n; i++) {
-        if (mask & (1 << i)) {
-          selectedHides.push(normalized[i]);
-          total += normalized[i].qty;
-        }
+  for (const hide of normalized) {
+    const hideCents = Math.round(hide.qty * scale);
+    const entries = Array.from(dp.entries());
+    for (const [sumCents, selectedHides] of entries) {
+      const nextSumCents = sumCents + hideCents;
+      if (nextSumCents <= maxCents && !dp.has(nextSumCents)) {
+        dp.set(nextSumCents, [...selectedHides, hide]);
       }
-
-      const difference = total - requested_qty;
-      const absDistance = Math.abs(difference);
-
-      combinations.push({
-        allocated_qty: Number(total.toFixed(2)),
-        difference: Number(difference.toFixed(2)),
-        distance: absDistance,
-        hides: selectedHides.map((h) => ({
-          hide_id: h.hide_id,
-          hide_qty: Number(h.qty.toFixed(2)),
-        })),
-        withinTolerance: absDistance <= tolerance,
-      });
-    }
-  } else {
-    // Greedy fallback for large hide sets: try prefix sums and some top-k combinations
-    let running = 0;
-    const sel = [];
-    for (const h of normalized) {
-      if (running >= requested_qty) break;
-      sel.push(h);
-      running += h.qty;
-    }
-    combinations.push({
-      allocated_qty: Number(running.toFixed(2)),
-      difference: Number((running - requested_qty).toFixed(2)),
-      distance: Math.abs(Number((running - requested_qty).toFixed(2))),
-      hides: sel.map((h) => ({
-        hide_id: h.hide_id,
-        hide_qty: Number(h.qty.toFixed(2)),
-      })),
-      withinTolerance: Math.abs(running - requested_qty) <= tolerance,
-    });
-
-    // try single largest + neighbours
-    for (let i = 0; i < Math.min(10, n); i++) {
-      let total = normalized[i].qty;
-      const selected = [normalized[i]];
-      for (let j = i + 1; j < Math.min(i + 6, n); j++) {
-        if (total >= requested_qty) break;
-        total += normalized[j].qty;
-        selected.push(normalized[j]);
-      }
-      combinations.push({
-        allocated_qty: Number(total.toFixed(2)),
-        difference: Number((total - requested_qty).toFixed(2)),
-        distance: Math.abs(Number((total - requested_qty).toFixed(2))),
-        hides: selected.map((h) => ({
-          hide_id: h.hide_id,
-          hide_qty: Number(h.qty.toFixed(2)),
-        })),
-        withinTolerance: Math.abs(total - requested_qty) <= tolerance,
-      });
     }
   }
 
-  // Sort by closest match first (distance). For equal distance prefer larger allocated_qty (less shortfall)
+  for (const [sumCents, selectedHides] of dp.entries()) {
+    if (selectedHides.length === 0) continue;
+    combinations.push(buildCombination(selectedHides, sumCents / scale));
+  }
+
+  // Prefer exact matches first, otherwise closest match and then larger allocated qty for less shortfall
   combinations.sort((a, b) => {
+    if (Math.abs(a.difference) <= EPSILON && Math.abs(b.difference) > EPSILON) return -1;
+    if (Math.abs(b.difference) <= EPSILON && Math.abs(a.difference) > EPSILON) return 1;
     if (a.distance !== b.distance) return a.distance - b.distance;
     return b.allocated_qty - a.allocated_qty;
   });
+
+  const exactMatch = combinations.find((c) => Math.abs(c.difference) <= EPSILON);
+  if (exactMatch) {
+    return [exactMatch];
+  }
 
   // Return top 5: prioritize within tolerance, then closest matches
   const withinTolerance = combinations.filter((c) => c.withinTolerance);
@@ -609,6 +797,17 @@ exports.createPI = async (req, res) => {
       );
     }
 
+    const createdPi = await ProformaInvoice.findByPk(pi.id, {
+      transaction: t,
+      include: [
+        { model: Customer, as: 'customer' },
+        { model: User, as: 'creator', attributes: ['id', 'name', 'email'] },
+        { model: PIItem, as: 'items', include: [{ model: LeatherProduct, as: 'product' }] },
+      ],
+    });
+
+    await createOrderFormSnapshotFromPI(createdPi, req.user, t);
+
     await t.commit();
     res.status(201).json({ message: "PI created successfully", pi_id: pi.id });
   } catch (err) {
@@ -623,8 +822,8 @@ exports.getPIs = async (req, res) => {
     // 🔐 RBAC: Build where clause based on user role
     const where = {};
 
-    if (req.user.role === "BUSINESS_EXECUTIVE") {
-      // Business Executive: Only sees their own PIs
+    // Only ADMIN sees all PIs - everyone else sees only their own
+    if (req.user.role !== "ADMIN") {
       where.created_by = req.user.id;
     }
 
@@ -724,12 +923,16 @@ exports.getPIs = async (req, res) => {
     console.log("Fetched PI : ",pis)
     const formattedResponse = pis.map((pi) => {
       const piJson = pi.toJSON();
-      console.log("FOrmatted json :",piJson.status)
+      const normalizedItems = (piJson.items || []).map((item) => ({
+        ...item,
+        batch_info: normalizeBatchInfoForQty(item.batch_info, item.qty),
+      }));
       return {
         ...piJson,
         ...(piJson.customer || {}),
         status: piJson.status,
         customer: undefined,
+        items: normalizedItems,
       };
     });
 
@@ -806,7 +1009,7 @@ exports.getPIById = async (req, res) => {
     }
 
     const items = pi.items.map((item) => {
-      // Ensure batch_info is always an array
+      // Ensure batch_info is always an array and normalize it to the item quantity
       let batchInfo = [];
       if (Array.isArray(item.batch_info)) batchInfo = item.batch_info;
       else if (typeof item.batch_info === "string") {
@@ -817,8 +1020,13 @@ exports.getPIById = async (req, res) => {
         }
       }
 
+      const normalizedBatchInfo = normalizeBatchInfoForQty(
+        batchInfo,
+        item.qty,
+      );
+
       // Create batch summary
-      const batch_summary = batchInfo.reduce((acc, b) => {
+      const batch_summary = normalizedBatchInfo.reduce((acc, b) => {
         if (!acc[b.batch_no])
           acc[b.batch_no] = { batch_no: b.batch_no, qty: 0 };
         acc[b.batch_no].qty += b.qty;
@@ -827,7 +1035,7 @@ exports.getPIById = async (req, res) => {
 
       return {
         ...item.toJSON(),
-        batch_info: batchInfo,
+        batch_info: normalizedBatchInfo,
         batch_summary: Object.values(batch_summary),
       };
     });
@@ -938,21 +1146,32 @@ exports.cancelPI = async (req, res) => {
       }
     }
 
-    // Only recalculate leather stock for products whose hide allocations changed.
-    // Vitton roll allocations are restored directly on LeatherStock and should not
-    // be overwritten by hide-based stock recalculation.
-    for (const productId of hideProductIds) {
-      await recalculateLeatherStock(productId);
-    }
-
     pi.status = "CANCELLED";
     console.log(`PI status changing to ${pi.status}`);
     pi.cancelled_at = new Date();
     await pi.save({ transaction: t });
     await t.commit();
+
+    // Recalculate hide-based leather stock after the cancel transaction commits.
+    // Running this inside the transaction can trigger lock/deadlock issues on the
+    // same stock rows and cause the cancel request to fail.
+    for (const productId of hideProductIds) {
+      try {
+        await recalculateLeatherStock(productId);
+      } catch (recalcErr) {
+        console.error(`Failed to recalculate leather stock after cancel for product ${productId}:`, recalcErr);
+      }
+    }
+
     res.json({ message: "PI cancelled and stock fully restored" });
   } catch (err) {
-    await t.rollback();
+    try {
+      if (t && !t.finished) {
+        await t.rollback();
+      }
+    } catch (rollbackErr) {
+      console.error("Cancel PI rollback failed:", rollbackErr);
+    }
     res.status(400).json({ error: err.message });
   }
 };
@@ -1125,11 +1344,9 @@ exports.suggestRevisit = async (req, res) => {
 
       const requestedQty = Number(item.qty);
       const providedRate = normalizeRevisionRate(item.rate);
-      const rate = providedRate !== null ? providedRate : rateMap[item.product_id];
-
-      if (rate === undefined || rate === null) {
-        throw new Error(`Rate not found for product ${item.product_id}. Provide a rate for added articles.`);
-      }
+      const fallbackRate = normalizeRevisionRate(rateMap[item.product_id]);
+      const rate = providedRate !== null ? providedRate : fallbackRate;
+      const effectiveRate = rate !== null ? rate : 0;
 
       // Check if it's Vitton collection
       const product = await LeatherProduct.findOne({
@@ -1207,10 +1424,10 @@ exports.suggestRevisit = async (req, res) => {
           difference: 0,
           difference_abs: 0,
           within_tolerance: true,
-          hides: [{ hide_id: "roll", hide_qty: requestedQty }],
-          rate,
+          hides: [{ hide_id: "roll", hide_qty: requestedQty, batch_no: "ROLL" }],
+          rate: effectiveRate,
           unit: "mtr",
-          line_amount: Number((requestedQty * rate).toFixed(2)),
+          line_amount: Number((requestedQty * effectiveRate).toFixed(2)),
         });
         continue;
       }
@@ -1226,60 +1443,76 @@ exports.suggestRevisit = async (req, res) => {
         lock: t.LOCK.SHARE,
       });
 
-      if (hideStocks.length === 0) {
+      const existingItem = pi.items.find(
+        (currentItem) => currentItem.product_id === item.product_id,
+      );
+      const revisionPlan = buildRevisitAllocationPlan({
+        existingItem,
+        requestedQty,
+        availableHideStocks: hideStocks,
+      });
+      const requiredAdditionalQty = Math.max(
+        0,
+        requestedQty -
+          revisionPlan.preservedBatchInfo.reduce(
+            (sum, batch) => sum + Number(batch.qty || 0),
+            0,
+          ),
+      );
+
+      if (hideStocks.length === 0 && requiredAdditionalQty > 0) {
         suggestions.push({
           product_id: item.product_id,
           requested_qty: requestedQty,
-          allocated_qty: 0,
-          difference: -requestedQty,
-          difference_abs: Math.abs(requestedQty),
-          hides: [],
-          rate,
+          allocated_qty: revisionPlan.allocatedQty,
+          difference: Number((revisionPlan.allocatedQty - requestedQty).toFixed(2)),
+          difference_abs: Math.abs(revisionPlan.allocatedQty - requestedQty),
+          hides: [...revisionPlan.preservedBatchInfo, ...revisionPlan.additionalBatchInfo].map((h) => ({
+            hide_id: h.hide_id,
+            hide_qty: h.qty,
+            batch_no: h.batch_no,
+          })),
+          rate: effectiveRate,
           reason: "No available hides",
         });
         continue;
       }
 
-      // Use optimal combination algorithm
-      const optimalCombinations = findOptimalHidesCombinations(
-        hideStocks.map((s) => ({ hide_id: s.hide_id, qty: s.qty })),
-        requestedQty,
-        1, // tolerance: 1 sqft
-      );
-
-      if (!optimalCombinations || optimalCombinations.length === 0) {
+      if (requiredAdditionalQty > 0 && revisionPlan.additionalQty < requiredAdditionalQty) {
         suggestions.push({
           product_id: item.product_id,
           requested_qty: requestedQty,
-          allocated_qty: 0,
-          difference: -requestedQty,
-          difference_abs: Math.abs(requestedQty),
-          hides: [],
-          rate,
+          allocated_qty: revisionPlan.allocatedQty,
+          difference: Number((revisionPlan.allocatedQty - requestedQty).toFixed(2)),
+          difference_abs: Math.abs(revisionPlan.allocatedQty - requestedQty),
+          hides: [...revisionPlan.preservedBatchInfo, ...revisionPlan.additionalBatchInfo].map((h) => ({
+            hide_id: h.hide_id,
+            hide_qty: h.qty,
+            batch_no: h.batch_no,
+          })),
+          rate: effectiveRate,
           unit: "sqft",
-          reason: "Cannot find optimal hide combination",
+          reason: "Insufficient available hide stock for the additional quantity",
         });
         continue;
       }
-
-      const bestMatch = optimalCombinations[0];
-      const difference = bestMatch.allocated_qty - requestedQty;
 
       suggestions.push({
         product_id: item.product_id,
         leather_code: item.leather_code,
         requested_qty: requestedQty,
-        allocated_qty: bestMatch.allocated_qty,
-        difference: Number(difference.toFixed(2)),
-        difference_abs: Math.abs(bestMatch.allocated_qty - requestedQty),
-        within_tolerance: bestMatch.withinTolerance,
-        hides: bestMatch.hides.map((h) => ({
+        allocated_qty: revisionPlan.allocatedQty,
+        difference: Number((revisionPlan.allocatedQty - requestedQty).toFixed(2)),
+        difference_abs: Math.abs(revisionPlan.allocatedQty - requestedQty),
+        within_tolerance: true,
+        hides: [...revisionPlan.preservedBatchInfo, ...revisionPlan.additionalBatchInfo].map((h) => ({
           hide_id: h.hide_id,
-          hide_qty: h.hide_qty,
+          hide_qty: h.qty,
+          batch_no: h.batch_no,
         })),
-        rate,
+        rate: effectiveRate,
         unit: "sqft",
-        line_amount: Number((bestMatch.allocated_qty * rate).toFixed(2)),
+        line_amount: Number((revisionPlan.allocatedQty * effectiveRate).toFixed(2)),
       });
     }
 
@@ -1303,18 +1536,26 @@ exports.revisitPI = async (req, res) => {
 
   try {
     const { id } = req.params;
-    const { items, billing_address, shipping_address, delivery_address } = req.body;
+    const {
+      items,
+      billing_address,
+      shipping_address,
+      delivery_address,
+      transport_amount,
+      revision_reason,
+      requires_reapproval,
+    } = req.body;
 
     console.log("REVISIT PI REQUEST:", {
       id,
       billing_address,
       shipping_address,
       delivery_address,
-      hasItems: Array.isArray(items)
+      transport_amount,
+      revision_reason,
+      requires_reapproval,
+      hasItems: Array.isArray(items),
     });
-
-    if (!Array.isArray(items) || items.length === 0)
-      throw new Error("No items provided for revisit");
 
     const pi = await ProformaInvoice.findByPk(id, {
       include: [{ model: PIItem, as: "items" }],
@@ -1323,209 +1564,96 @@ exports.revisitPI = async (req, res) => {
     });
 
     if (!pi) throw new Error("PI not found");
-    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status))
+    if (!["ACTIVE", "PENDING_APPROVAL", "CONFIRMED"].includes(pi.status)) {
       throw new Error(
         "PI can only be revisited if status is ACTIVE, PENDING_APPROVAL, or CONFIRMED",
       );
-    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id)
+    }
+    if (req.user.role === "BUSINESS_EXECUTIVE" && pi.created_by !== req.user.id) {
       throw new Error("Unauthorized: You can only revise your own PIs");
-
-    const rateMap = {};
-    pi.items.forEach((i) => {
-      rateMap[i.product_id] = i.rate;
-    });
-
-    const productIds = pi.items.map((i) => i.product_id);
-    const stocks = await LeatherStock.findAll({
-      where: { product_id: { [Op.in]: productIds } },
-      transaction: t,
-      lock: t.LOCK.UPDATE,
-    });
-    const stockMap = {};
-    stocks.forEach((s) => {
-      stockMap[s.product_id] = s;
-    });
-
-    for (const oldItem of pi.items) {
-      const stock = stockMap[oldItem.product_id];
-      if (stock) {
-        stock.available_qty += oldItem.qty;
-        stock.reserved_qty -= oldItem.qty;
-        if (stock.reserved_qty < 0) stock.reserved_qty = 0;
-        await stock.save({ transaction: t });
-      }
-
-      let batches = [];
-      if (Array.isArray(oldItem.batch_info)) batches = oldItem.batch_info;
-      else if (typeof oldItem.batch_info === "string") {
-        try {
-          batches = JSON.parse(oldItem.batch_info);
-        } catch {
-          batches = [];
-        }
-      }
-      batches = batches.filter((b) => b && b.hide_id);
-
-      for (const b of batches) {
-        const hideStock = await LeatherHideStock.findOne({
-          where: { hide_id: b.hide_id },
-          transaction: t,
-          lock: t.LOCK.UPDATE,
-        });
-        if (hideStock) {
-          hideStock.qty += b.qty;
-          hideStock.status = "AVAILABLE";
-          await hideStock.save({ transaction: t });
-        }
-      }
     }
 
-    await PIItem.destroy({ where: { pi_id: pi.id }, transaction: t });
+    const hasRevisionInput =
+      Array.isArray(items) ||
+      billing_address !== undefined ||
+      shipping_address !== undefined ||
+      delivery_address !== undefined ||
+      transport_amount !== undefined ||
+      revision_reason !== undefined ||
+      requires_reapproval !== undefined;
 
-    for (const item of items) {
-      if (!item.product_id || !item.qty || item.qty <= 0)
-        throw new Error("Invalid item payload");
+    if (!hasRevisionInput) {
+      throw new Error("No revision data provided");
+    }
 
-      // Use manual rate if provided, otherwise use existing rate
-      const providedRate = normalizeRevisionRate(item.rate);
-      const rate = providedRate !== null ? providedRate : rateMap[item.product_id];
-      if (rate === undefined || rate === null || isNaN(rate))
-        throw new Error(
-          `Rate not found for product ${item.product_id}. Cannot revisit PI without a rate for new articles`,
-        );
+    const currentRevisionNo = Number(pi.revision_no || 0) + 1;
+    const revisedPiPayload = buildRevisionPiData({
+      originalPi: pi.toJSON(),
+      transportAmount: transport_amount ?? pi.transport_amount ?? 0,
+      revisionReason: revision_reason,
+      requiresReapproval: requires_reapproval !== undefined ? Boolean(requires_reapproval) : true,
+      revisionNo: currentRevisionNo,
+      createdBy: req.user?.id ?? pi.created_by,
+    });
 
-      // Check if it's Vitton collection
-      const product = await LeatherProduct.findOne({
-        where: { id: item.product_id },
-        include: [
-          {
-            model: CollectionSeries,
-            as: "series",
-            include: [
-              {
-                model: SubCollection,
-                as: "subCollection",
-                include: [
-                  {
-                    model: MainCollection,
-                    as: "mainCollection",
-                    attributes: ["name"],
-                  },
-                ],
-              },
-            ],
-          },
-        ],
-        transaction: t,
-      });
+    if (billing_address !== undefined) revisedPiPayload.billing_address = billing_address;
+    if (shipping_address !== undefined) revisedPiPayload.shipping_address = shipping_address;
+    if (delivery_address !== undefined) revisedPiPayload.delivery_address = delivery_address;
 
-      const isVitton = product?.series?.subCollection?.mainCollection?.name?.toLowerCase().includes('vitton');
+    const revisedPi = await ProformaInvoice.create(revisedPiPayload, { transaction: t });
 
-      const leatherStock = await LeatherStock.findOne({
-        where: { product_id: item.product_id },
-        order: [['available_qty', 'DESC']],
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      });
-      if (!leatherStock)
-        throw new Error(
-          `LeatherStock not found for product ${item.product_id}`,
-        );
+    const revisionItems = Array.isArray(items)
+      ? items.map((item) => ({
+          product_id: Number(item.product_id),
+          qty: Number(item.qty),
+          rate: item.rate !== undefined && item.rate !== null && item.rate !== "" ? Number(item.rate) : null,
+          batch_info: item.batch_info || null,
+          surcharge: Number(item.surcharge || 0),
+        }))
+      : [];
 
-      if (isVitton) {
-        // For Vitton, allow any allocation up to the available roll quantity
-        if (item.qty > leatherStock.available_qty) {
-          throw new Error(
-            `For Vitton collection, available roll size is ${leatherStock.available_qty} sqm, requested ${item.qty} sqm.`,
-          );
+    if (revisionItems.length > 0) {
+      for (const item of revisionItems) {
+        if (!item.product_id || !Number.isFinite(item.qty) || item.qty <= 0) {
+          throw new Error("Invalid item payload");
         }
-
-        // Allocate the requested portion of the roll
-        leatherStock.available_qty -= item.qty;
-        leatherStock.reserved_qty += item.qty;
-        await leatherStock.save({ transaction: t });
 
         await PIItem.create(
           {
-            pi_id: pi.id,
+            pi_id: revisedPi.id,
             product_id: item.product_id,
             qty: item.qty,
-            rate,
-            batch_info: [{ hide_id: "roll", batch_no: "ROLL", qty: item.qty }],
+            rate: item.rate,
+            batch_info: item.batch_info,
+            surcharge: item.surcharge || 0,
           },
           { transaction: t },
         );
-        continue;
       }
-
-      // Non-Vitton logic
-      if (leatherStock.available_qty < item.qty)
-        throw new Error(
-          `Insufficient available stock for product ${item.product_id}`,
+    } else {
+      for (const item of pi.items || []) {
+        await PIItem.create(
+          {
+            pi_id: revisedPi.id,
+            product_id: item.product_id,
+            qty: item.qty,
+            rate: item.rate,
+            batch_info: item.batch_info,
+            surcharge: item.surcharge || 0,
+          },
+          { transaction: t },
         );
-
-      const hideStocks = await LeatherHideStock.findAll({
-        where: { product_id: item.product_id, status: "AVAILABLE" },
-        attributes: ["id", "hide_id", "qty", "batch_no"],
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      });
-      if (hideStocks.length === 0)
-        throw new Error(`No available hides for product ${item.product_id}`);
-
-      const optimalCombination = findOptimalHidesCombinations(
-        hideStocks.map((s) => ({ hide_id: s.hide_id, qty: s.qty })),
-        item.qty,
-        1,
-      );
-      if (!optimalCombination || optimalCombination.length === 0)
-        throw new Error(
-          `Cannot find hide combination for ${item.qty} sqft for product ${item.product_id}`,
-        );
-
-      const bestMatch = optimalCombination[0];
-      const usedBatches = [];
-
-      for (const hide of bestMatch.hides) {
-        const stock = hideStocks.find((s) => s.hide_id === hide.hide_id);
-        if (!stock) throw new Error(`Hide ${hide.hide_id} not found`);
-        stock.qty -= hide.hide_qty;
-        stock.status = stock.qty <= 0 ? "RESERVED" : "AVAILABLE";
-        await stock.save({ transaction: t });
-        usedBatches.push({
-          hide_id: stock.hide_id,
-          batch_no: stock.batch_no,
-          qty: hide.hide_qty,
-        });
       }
-
-      leatherStock.available_qty -= bestMatch.allocated_qty;
-      leatherStock.reserved_qty += bestMatch.allocated_qty;
-      await leatherStock.save({ transaction: t });
-
-      await PIItem.create(
-        {
-          pi_id: pi.id,
-          product_id: item.product_id,
-          qty: bestMatch.allocated_qty,
-          rate,
-          batch_info: usedBatches,
-        },
-        { transaction: t },
-      );
     }
 
-    // Update address fields if provided
-    if (billing_address !== undefined) pi.billing_address = billing_address;
-    if (shipping_address !== undefined) pi.shipping_address = shipping_address;
-    if (delivery_address !== undefined) pi.delivery_address = delivery_address;
-
-    // Set status back to PENDING_APPROVAL so admin needs to approve the changes
-    pi.status = "PENDING_APPROVAL";
-    pi.updatedAt = new Date();
-    await pi.save({ transaction: t });
     await t.commit();
-    res.json({ message: "PI revisited successfully. Please wait for admin approval." });
+    return res.json({
+      message: "PI revised successfully",
+      pi_id: revisedPi.id,
+      parent_pi_id: pi.id,
+      revision_no: revisedPi.revision_no,
+      require_reapproval: revisedPi.status === "PENDING_APPROVAL",
+    });
   } catch (err) {
     await t.rollback();
     res.status(400).json({ error: err.message });
@@ -1538,21 +1666,35 @@ exports.revisitPI = async (req, res) => {
  */
 exports.suggestBatch = async (req, res) => {
   try {
-    const { items, collection_id } = req.body;
+    const { items, collection_id, collection_ids } = req.body;
     if (!Array.isArray(items) || items.length === 0)
       throw new Error("No items provided");
 
-    // Check if it's Vitton collection
+    const requestedCollectionIds = Array.isArray(collection_ids)
+      ? collection_ids.filter(Boolean)
+      : collection_id
+        ? [collection_id]
+        : [];
+
+    // Check if any selected collection is Vitton
     let isVittonColl = false;
-    if (collection_id) {
-      const mainColl = await MainCollection.findByPk(collection_id, { attributes: ['name'] });
-      isVittonColl = mainColl?.name?.toLowerCase().includes('vitton');
-      console.log('collection_id:', collection_id, 'mainColl.name:', mainColl?.name, 'isVittonColl:', isVittonColl);
+    if (requestedCollectionIds.length > 0) {
+      const mainCollections = await MainCollection.findAll({
+        where: { id: requestedCollectionIds },
+        attributes: ['id', 'name'],
+      });
+      isVittonColl = mainCollections.some((mainColl) =>
+        String(mainColl?.name || '').toLowerCase().includes('vitton'),
+      );
+      console.log('requestedCollectionIds:', requestedCollectionIds, 'isVittonColl:', isVittonColl);
     }
 
     // configurable tolerance in sqft (default 1 sqft)
     const TOLERANCE = 1;
+    const EPSILON = 0.01;
     const response = [];
+
+    const roundQty = (value) => Number((Number(value) || 0).toFixed(2));
 
     /**
      * Find all possible hide combinations and rank by closest match to requested qty
@@ -1561,91 +1703,71 @@ exports.suggestBatch = async (req, res) => {
     const findOptimalHidesCombinations = (hideList, requested_qty) => {
       if (hideList.length === 0) return [];
 
+      const normalizedRequestedQty = roundQty(requested_qty);
+
       // Normalize hides: ensure numeric qty and stable order (largest first helps greedy fallback)
       const normalized = hideList
-        .map((h) => ({ hide_id: h.hide_id, qty: Number(h.qty) }))
+        .map((h) => ({ hide_id: h.hide_id, qty: roundQty(h.qty) }))
         .filter((h) => h.qty > 0)
         .sort((a, b) => b.qty - a.qty);
+
+      const buildCombination = (selectedHides, total) => {
+        const roundedTotal = roundQty(total);
+        const difference = roundQty(roundedTotal - normalizedRequestedQty);
+        const absDistance = Math.abs(difference);
+        return {
+          allocated_qty: roundedTotal,
+          difference,
+          distance: absDistance,
+          hides: selectedHides.map((h) => ({
+            hide_id: h.hide_id,
+            hide_qty: roundQty(h.qty),
+          })),
+          withinTolerance: absDistance <= TOLERANCE + EPSILON,
+        };
+      };
 
       const combinations = [];
       const n = normalized.length;
 
-      // Safety: exhaustive search only for reasonably small n (<=20)
-      const MAX_EXHAUSTIVE = 20;
+      // Use a scaled subset-sum style search so large batches still find exact or near-exact matches.
+      const scale = 100;
+      const maxCents = Math.round(
+        Math.max(normalizedRequestedQty, normalizedRequestedQty + TOLERANCE) * scale + 100,
+      );
+      const dp = new Map([[0, []]]);
 
-      if (n <= MAX_EXHAUSTIVE) {
-        for (let mask = 1; mask < 1 << n; mask++) {
-          let total = 0;
-          const selectedHides = [];
-
-          for (let i = 0; i < n; i++) {
-            if (mask & (1 << i)) {
-              selectedHides.push(normalized[i]);
-              total += normalized[i].qty;
-            }
+      for (const hide of normalized) {
+        const hideCents = Math.round(hide.qty * scale);
+        const entries = Array.from(dp.entries());
+        for (const [sumCents, selectedHides] of entries) {
+          const nextSumCents = sumCents + hideCents;
+          if (nextSumCents <= maxCents && !dp.has(nextSumCents)) {
+            dp.set(nextSumCents, [...selectedHides, hide]);
           }
-
-          const difference = total - requested_qty;
-          const absDistance = Math.abs(difference);
-
-          combinations.push({
-            allocated_qty: Number(total.toFixed(2)),
-            difference: Number(difference.toFixed(2)),
-            distance: absDistance,
-            hides: selectedHides.map((h) => ({
-              hide_id: h.hide_id,
-              hide_qty: Number(h.qty.toFixed(2)),
-            })),
-            withinTolerance: absDistance <= TOLERANCE,
-          });
-        }
-      } else {
-        // Greedy fallback for large hide sets: try prefix sums and some top-k combinations
-        let running = 0;
-        const sel = [];
-        for (const h of normalized) {
-          if (running >= requested_qty) break;
-          sel.push(h);
-          running += h.qty;
-        }
-        combinations.push({
-          allocated_qty: Number(running.toFixed(2)),
-          difference: Number((running - requested_qty).toFixed(2)),
-          distance: Math.abs(Number((running - requested_qty).toFixed(2))),
-          hides: sel.map((h) => ({
-            hide_id: h.hide_id,
-            hide_qty: Number(h.qty.toFixed(2)),
-          })),
-          withinTolerance: Math.abs(running - requested_qty) <= TOLERANCE,
-        });
-
-        // try single largest + neighbours
-        for (let i = 0; i < Math.min(10, n); i++) {
-          let total = normalized[i].qty;
-          const selected = [normalized[i]];
-          for (let j = i + 1; j < Math.min(i + 6, n); j++) {
-            if (total >= requested_qty) break;
-            total += normalized[j].qty;
-            selected.push(normalized[j]);
-          }
-          combinations.push({
-            allocated_qty: Number(total.toFixed(2)),
-            difference: Number((total - requested_qty).toFixed(2)),
-            distance: Math.abs(Number((total - requested_qty).toFixed(2))),
-            hides: selected.map((h) => ({
-              hide_id: h.hide_id,
-              hide_qty: Number(h.qty.toFixed(2)),
-            })),
-            withinTolerance: Math.abs(total - requested_qty) <= TOLERANCE,
-          });
         }
       }
 
-      // Sort by closest match first (distance). For equal distance prefer larger allocated_qty (less shortfall)
+      for (const [sumCents, selectedHides] of dp.entries()) {
+        if (selectedHides.length === 0) continue;
+        combinations.push(buildCombination(selectedHides, sumCents / scale));
+      }
+
+      // Sort by exact match first, then by smaller overshoot, then by closer distance.
+      // This prevents a larger over-allocation (for example 110.25) from beating a true available match (101.50).
       combinations.sort((a, b) => {
+        const aExact = Math.abs(a.difference) <= EPSILON;
+        const bExact = Math.abs(b.difference) <= EPSILON;
+        if (aExact !== bExact) return aExact ? -1 : 1;
         if (a.distance !== b.distance) return a.distance - b.distance;
+        if (a.difference !== b.difference) return a.difference - b.difference;
         return b.allocated_qty - a.allocated_qty;
       });
+
+      const exactMatch = combinations.find((c) => Math.abs(c.difference) <= EPSILON);
+      if (exactMatch) {
+        return [exactMatch];
+      }
 
       // Return top 5: prioritize within tolerance, then closest matches
       const withinTolerance = combinations.filter((c) => c.withinTolerance);
@@ -2692,14 +2814,11 @@ exports.updatePIItem = async (req, res) => {
     console.log("✓ Found item:", { id: item.id, product_id: item.product_id, current_batch_info: item.batch_info });
 
     let updatedBatchInfo = [];
-    let updatedQty = item.qty;
+    const currentItemQty = Number(item.qty || 0);
+    let updatedQty = currentItemQty;
 
     if (Array.isArray(batch_info)) {
       updatedBatchInfo = batch_info;
-      const sumQty = batch_info.reduce((sum, b) => sum + Number(b.qty || 0), 0);
-      if (!req.body.qty) {
-        updatedQty = sumQty;
-      }
     } else if (Array.isArray(hides)) {
       updatedBatchInfo = hides.map((h) => ({
         hide_id: h.hide_id,
@@ -2707,14 +2826,22 @@ exports.updatePIItem = async (req, res) => {
         qty: Number(h.hide_qty),
         collection_series_id: h.collection_series_id || null,
       }));
-      updatedQty = updatedBatchInfo.reduce((sum, b) => sum + Number(b.qty || 0), 0);
     } else {
       throw new Error("batch_info or hides array is required");
     }
 
     if (req.body.qty !== undefined) {
-      updatedQty = Number(req.body.qty);
+      updatedQty = resolveUpdatedItemQty({
+        incomingQty: req.body.qty,
+        currentQty: currentItemQty,
+      });
+    } else {
+      updatedQty = currentItemQty;
     }
+
+    updatedBatchInfo = normalizeBatchInfoForQty(updatedBatchInfo, updatedQty);
+    updatedQty = updatedBatchInfo.reduce((sum, b) => sum + Number(b.qty || 0), 0);
+    updatedQty = Math.min(updatedQty, currentItemQty || updatedQty);
 
     console.log(`📦 Final updatedBatchInfo has ${updatedBatchInfo.length} hides:`, updatedBatchInfo.map(b => ({ hide_id: b.hide_id, qty: b.qty })));
     // Otherwise, calculate by comparing old vs new allocations
@@ -3092,7 +3219,20 @@ exports.getPendingApprovalPIs = async (req, res) => {
       order: [["createdAt", "DESC"]],
     });
 
-    res.json(pis);
+    const formattedResponse = pis.map((pi) => {
+      const piJson = pi.toJSON();
+      const normalizedItems = (piJson.items || []).map((item) => ({
+        ...item,
+        batch_info: normalizeBatchInfoForQty(item.batch_info, item.qty),
+      }));
+
+      return {
+        ...piJson,
+        items: normalizedItems,
+      };
+    });
+
+    res.json(formattedResponse);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

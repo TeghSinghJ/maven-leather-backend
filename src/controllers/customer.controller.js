@@ -2,6 +2,10 @@
 
 const XLSX = require('xlsx');
 const { Customer, sequelize } = require('../../models');
+const { Op } = require('sequelize');
+const { getCache, setCache, deleteCacheByPrefix } = require('../services/cache.service');
+
+const CUSTOMER_CACHE_TTL = 120; // seconds
 
 exports.bulkUpload = async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'CSV/Excel file is required' });
@@ -56,6 +60,7 @@ exports.bulkUpload = async (req, res) => {
     }
 
     await transaction.commit();
+    await deleteCacheByPrefix('customers:');
     res.json({ message: 'Customers bulk uploaded successfully', total_rows: rows.length });
   } catch (error) {
     await transaction.rollback();
@@ -66,6 +71,7 @@ exports.bulkUpload = async (req, res) => {
 exports.create = async (req, res) => {
   try {
     const customer = await Customer.create(req.body);
+    await deleteCacheByPrefix('customers:');
     return res.status(201).json(customer);
   } catch (error) {
     console.error(error);
@@ -78,10 +84,41 @@ exports.create = async (req, res) => {
 
 exports.getAll = async (req, res) => {
   try {
-    const customers = await Customer.findAll({
-      where: { status: 'ACTIVE' },
+    const { search, page, limit, price_list } = req.query;
+    const cacheKey = `customers:${JSON.stringify({ search: search || '', page: page || '1', limit: limit || '0', price_list: price_list || '' })}`;
+
+    const cachedCustomers = await getCache(cacheKey);
+    if (cachedCustomers) {
+      return res.json(cachedCustomers);
+    }
+
+    const where = { status: 'ACTIVE' };
+
+    if (price_list) {
+      where.price_list = String(price_list).toUpperCase();
+    }
+
+    if (search && search.trim()) {
+      const q = `%${search.trim()}%`;
+      where[Op.or] = [
+        { customer_name: { [Op.like]: q } },
+        { gst_number: { [Op.like]: q } },
+        { contact_number: { [Op.like]: q } },
+      ];
+    }
+
+    const queryOptions = {
+      where,
       order: [['createdAt', 'DESC']],
-    });
+    };
+
+    if (limit) {
+      queryOptions.limit = Number(limit);
+      queryOptions.offset = page ? (Number(page) - 1) * Number(limit) : 0;
+    }
+
+    const customers = await Customer.findAll(queryOptions);
+    await setCache(cacheKey, customers, CUSTOMER_CACHE_TTL);
     res.json(customers);
   } catch (error) {
     res.status(500).json({ error: error.message });
@@ -107,6 +144,7 @@ exports.update = async (req, res) => {
     }
 
     await customer.update(req.body);
+    await deleteCacheByPrefix('customers:');
     res.json({
       message: 'Customer updated successfully',
       customer,
